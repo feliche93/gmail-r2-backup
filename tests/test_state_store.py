@@ -40,3 +40,15 @@ def test_uploaded_count_and_has_uploaded_any(state_store) -> None:
     state_store.mark_uploaded("m1")
     assert state_store.uploaded_count() == 1
     assert state_store.has_uploaded_any() is True
+
+
+def test_bulk_mark_uploaded_inserts_and_is_idempotent(state_store, monkeypatch) -> None:
+    monkeypatch.setattr(state_mod.time, "time", lambda: 1000)
+    assert state_store.uploaded_count() == 0
+
+    state_store.bulk_mark_uploaded([("m1", 111), ("m2", 222)])
+    assert state_store.uploaded_count() == 2
+
+    # Idempotent: re-inserting existing ids should not change count.
+    state_store.bulk_mark_uploaded([("m2", 333), ("m3", 444)])
+    assert state_store.uploaded_count() == 3

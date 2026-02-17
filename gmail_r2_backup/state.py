@@ -255,12 +255,40 @@ class StateStore:
         finally:
             con.close()
 
+    def bulk_mark_uploaded(self, rows: list[tuple[str, int]]) -> None:
+        """
+        Backfill the uploaded index efficiently.
+
+        rows is a list of (message_id, uploaded_at_epoch_seconds).
+        """
+        if not rows:
+            return
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("begin")
+            con.executemany(
+                "insert into messages(id, uploaded_at) values(?, ?) on conflict(id) do nothing",
+                rows,
+            )
+            con.execute("commit")
+        finally:
+            con.close()
+
     # ---- restore index ----
     def was_restored(self, source_message_id: str) -> bool:
         con = sqlite3.connect(self._db_path)
         try:
             row = con.execute("select 1 from restored where source_id = ?", (source_message_id,)).fetchone()
             return row is not None
+        finally:
+            con.close()
+
+    def restored_count(self) -> int:
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute("select count(1) from restored").fetchone()
+            return int(row[0]) if row else 0
         finally:
             con.close()
 

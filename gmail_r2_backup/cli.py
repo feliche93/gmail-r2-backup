@@ -41,7 +41,9 @@ def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        # python-dotenv's implicit find_dotenv() can be brittle in some execution modes.
+        # Prefer an explicit path relative to CWD.
+        load_dotenv(dotenv_path=str(Path.cwd() / ".env"), override=False)
     except Exception:
         return
 
@@ -298,6 +300,102 @@ def restore(
                 print(f"- {s}", file=sys.stderr)
         if apply and stats.errors != 0:
             raise typer.Exit(code=2)
+
+
+@app.command("rehydrate-index")
+def rehydrate_index(
+    restore_markers: bool = typer.Option(
+        False,
+        "--restore-markers",
+        help="Also rehydrate the local restore index from R2 restore markers (state/restore/*.json).",
+    ),
+    max_messages: int = typer.Option(
+        0,
+        "--max-messages",
+        min=0,
+        help="Optional cap for testing (0 = unlimited).",
+    ),
+    progress_every: int = typer.Option(
+        1000,
+        "--progress-every",
+        min=0,
+        help="Print progress every N scanned objects (0 disables).",
+    ),
+) -> None:
+    """
+    Rebuild the local sqlite index from R2 objects.
+
+    This is useful if you already have data in R2 (or moved machines) and want local counts/state to match.
+    """
+    _load_dotenv()
+    cfg = load_app_config()
+    r2cfg = R2Config.from_env_or_config(cfg)
+    st = StateStore.open_default()
+    with st.run_lock():
+        r2 = R2Client(r2cfg)
+
+        before = st.uploaded_count()
+        batch: list[tuple[str, int]] = []
+        scanned = 0
+        inserted_hint = 0
+        now = int(time.time())
+
+        started = time.monotonic()
+        for obj in r2.iter_objects("messages/"):
+            scanned += 1
+            if max_messages and scanned > max_messages:
+                break
+            if not obj.key.endswith(".eml.gz"):
+                continue
+            if not obj.key.startswith("messages/"):
+                continue
+            mid = obj.key[len("messages/") : -len(".eml.gz")]
+            if not mid:
+                continue
+            uploaded_at = obj.last_modified_at or now
+            batch.append((mid, uploaded_at))
+            if len(batch) >= 2000:
+                st.bulk_mark_uploaded(batch)
+                inserted_hint += len(batch)
+                batch.clear()
+
+            if progress_every and (scanned % int(progress_every) == 0):
+                elapsed = time.monotonic() - started
+                rate = scanned / elapsed if elapsed > 0 else 0.0
+                print(f"[rehydrate] scanned={scanned} rate={rate:.1f}/s local_uploaded={st.uploaded_count()}", file=sys.stderr)
+
+        if batch:
+            st.bulk_mark_uploaded(batch)
+            inserted_hint += len(batch)
+
+        after = st.uploaded_count()
+        print(f"Rehydrated message index: local_uploaded {before} -> {after} (delta={after - before})")
+
+        if restore_markers:
+            before_r = st.restored_count()
+            scanned_r = 0
+            for obj in r2.iter_objects("state/restore/"):
+                scanned_r += 1
+                if not obj.key.endswith(".json"):
+                    continue
+                marker = r2.get_json_or_none(obj.key)
+                if not isinstance(marker, dict):
+                    continue
+                source_id = marker.get("sourceId")
+                if not isinstance(source_id, str) or not source_id:
+                    continue
+                st.mark_restored(
+                    source_message_id=source_id,
+                    restored_message_id=marker.get("restoredId") if isinstance(marker.get("restoredId"), str) else None,
+                    message_id_header=marker.get("messageIdHeader")
+                    if isinstance(marker.get("messageIdHeader"), str)
+                    else None,
+                    raw_sha256=marker.get("rawSha256") if isinstance(marker.get("rawSha256"), str) else None,
+                )
+                if progress_every and (scanned_r % int(progress_every) == 0):
+                    print(f"[rehydrate] scanned_restore_markers={scanned_r} restored_rows={st.restored_count()}", file=sys.stderr)
+            after_r = st.restored_count()
+            print(f"Rehydrated restore index: restored_rows {before_r} -> {after_r} (delta={after_r - before_r})")
 
 
 @app.command()

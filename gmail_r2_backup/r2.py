@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, Iterator
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -14,6 +15,14 @@ from .config import R2Config
 @dataclass(frozen=True)
 class PutResult:
     etag: str | None
+
+
+@dataclass(frozen=True)
+class ListedObject:
+    # Key is relative to the configured prefix (i.e. without cfg.prefix/).
+    key: str
+    size: int
+    last_modified_at: int | None  # epoch seconds (UTC) when available
 
 
 class R2Client:
@@ -85,3 +94,33 @@ class R2Client:
                 token = resp.get("NextContinuationToken")
                 continue
             return out
+
+    def iter_objects(self, key_prefix: str) -> Iterator[ListedObject]:
+        """
+        Streams objects under key_prefix (relative to configured prefix).
+        """
+        prefix = self._key(key_prefix)
+        token = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self._cfg.bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = self._s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []) or []:
+                k = obj.get("Key")
+                if not k:
+                    continue
+                if self._cfg.prefix and k.startswith(self._cfg.prefix.rstrip("/") + "/"):
+                    k = k[len(self._cfg.prefix.rstrip("/") + "/") :]
+                size = int(obj.get("Size", 0) or 0)
+                lm = obj.get("LastModified")
+                ts: int | None = None
+                if isinstance(lm, dt.datetime):
+                    if lm.tzinfo is None:
+                        lm = lm.replace(tzinfo=dt.timezone.utc)
+                    ts = int(lm.timestamp())
+                yield ListedObject(key=k, size=size, last_modified_at=ts)
+            if resp.get("IsTruncated"):
+                token = resp.get("NextContinuationToken")
+                continue
+            return
