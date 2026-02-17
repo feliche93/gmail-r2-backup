@@ -42,14 +42,46 @@ The endpoint is derived from `R2_ACCOUNT_ID`:
 
 ## Authenticate Gmail
 
-1. Create an OAuth client (Desktop app) and download `credentials.json`.
-2. Run:
+This project uses the OAuth 2.0 "installed app" flow (a desktop application).
+When you run `gmail-r2-backup auth ...`, it starts a temporary local HTTP server on `localhost` (random free port),
+opens your browser for consent, receives the OAuth authorization code on the loopback redirect URL
+(`http://localhost:<port>/`), then exchanges it for tokens and stores a refresh token locally.
+
+### Create Google OAuth Credentials (Desktop App)
+
+In Google Cloud Console:
+
+1. Create/select a project.
+2. Enable the **Gmail API**.
+3. Configure **APIs & Services -> OAuth consent screen**:
+   - Use **External** for consumer Gmail accounts.
+   - If the app is in "Testing", add your Gmail address under **Test users**.
+   - Add scopes you plan to use:
+     - Backup-only: `https://www.googleapis.com/auth/gmail.readonly`
+     - Restore: `https://www.googleapis.com/auth/gmail.insert` and `https://www.googleapis.com/auth/gmail.modify`
+4. Create credentials:
+   - **APIs & Services -> Credentials -> Create Credentials -> OAuth client ID**
+   - Application type: **Desktop app**
+   - Download the JSON file (often named something like `client_secret_....json`)
+
+Note: for **Desktop app** credentials you do not manually configure redirect URIs; the installed-app flow uses the loopback
+redirect on `http://localhost` (the library picks a free port automatically).
+
+### Run Auth
+
+Run (backup/read-only):
 
 ```bash
 gmail-r2-backup auth --credentials /path/to/credentials.json
 ```
 
-This opens a browser for OAuth consent and stores a refresh token locally.
+Run (restore/write scopes):
+
+```bash
+gmail-r2-backup auth --credentials /path/to/credentials.json --write
+```
+
+This opens a browser for OAuth consent and stores a refresh token locally (see "Local state" below).
 
 ## Run a backup
 
