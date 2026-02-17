@@ -74,7 +74,10 @@ class StateStore:
     def read_token_json(self) -> dict[str, Any] | None:
         try:
             with open(self._token_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("token.json must be a JSON object")
+                return data
         except FileNotFoundError:
             return None
 
@@ -88,7 +91,10 @@ class StateStore:
     def read_state(self) -> dict[str, Any]:
         try:
             with open(self._state_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("state.json must be a JSON object")
+                return data
         except FileNotFoundError:
             return {}
 

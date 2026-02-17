@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -49,7 +49,7 @@ class R2Client:
 
     def get_bytes(self, key: str) -> bytes:
         resp = self._s3.get_object(Bucket=self._cfg.bucket, Key=self._key(key))
-        return resp["Body"].read()
+        return cast(bytes, resp["Body"].read())
 
     def get_json_or_none(self, key: str) -> Any | None:
         try:

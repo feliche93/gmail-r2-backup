@@ -4,7 +4,7 @@ import base64
 import json
 import random
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, cast
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -134,7 +134,7 @@ class GmailClient:
 
     def get_profile(self) -> dict[str, Any]:
         req = self._svc.users().getProfile(userId="me")
-        return self._execute_with_retries(req)
+        return cast(dict[str, Any], self._execute_with_retries(req))
 
     def list_messages(self, q: str | None = None, max_results: int = 0) -> Iterable[str]:
         # Yields message IDs
@@ -220,6 +220,7 @@ class GmailClient:
             .get(userId="me", id=message_id, format="raw")
         )
         msg = self._execute_with_retries(msg)
+        msg = cast(dict[str, Any], msg)
         raw_b64 = msg.get("raw")
         if not raw_b64:
             raise ValueError("No raw content for message")
@@ -259,7 +260,7 @@ class GmailClient:
                 body=body,
             )
         )
-        return self._execute_with_retries(req)
+        return cast(dict[str, Any], self._execute_with_retries(req))
 
     def modify_labels(self, message_id: str, *, add: list[str] | None = None, remove: list[str] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {}
@@ -268,11 +269,11 @@ class GmailClient:
         if remove:
             body["removeLabelIds"] = remove
         req = self._svc.users().messages().modify(userId="me", id=message_id, body=body)
-        return self._execute_with_retries(req)
+        return cast(dict[str, Any], self._execute_with_retries(req))
 
     def trash(self, message_id: str) -> dict[str, Any]:
         req = self._svc.users().messages().trash(userId="me", id=message_id)
-        return self._execute_with_retries(req)
+        return cast(dict[str, Any], self._execute_with_retries(req))
 
     @staticmethod
     def is_history_too_old(err: Exception) -> bool:

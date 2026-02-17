@@ -86,11 +86,13 @@ The backup writes:
 - Local state store (sqlite + json): `gmail_r2_backup/state.py`
 - R2 config loading: `gmail_r2_backup/config.py`
 
-## Lightweight Checks (No Test Suite Assumed)
+## Checks
 
-If no test tooling is set up, use these as minimum sanity checks after code changes:
+Use these as minimum sanity checks after code changes:
 
 ```bash
 python -m compileall gmail_r2_backup
 gmail-r2-backup --help
+uv run pytest
+uv run mypy gmail_r2_backup
 ```

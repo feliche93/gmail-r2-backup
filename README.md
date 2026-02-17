@@ -31,6 +31,13 @@ source .venv/bin/activate
 # pip install -e .
 ```
 
+## Development checks
+
+```bash
+uv run pytest
+uv run mypy gmail_r2_backup
+```
+
 ## Configure R2
 
 Set env vars (recommended):

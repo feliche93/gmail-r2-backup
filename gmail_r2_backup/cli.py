@@ -11,8 +11,10 @@ import typer
 from .config import R2Config, load_app_config
 from .gmail import GmailClient
 from .backup import BackupRunner
+from .backup import BackupStats
 from .r2 import R2Client
 from .restore import RestoreRunner
+from .restore import RestoreStats
 from .state import StateStore
 
 
@@ -124,7 +126,7 @@ def backup(
     )
     runner = BackupRunner(gmail=gmail, r2=r2, state=st)
     since_date = _parse_since(since)
-    def _progress(phase: str, n: int, stats: object, elapsed_s: float) -> None:
+    def _progress(phase: str, n: int, stats: BackupStats, elapsed_s: float) -> None:
         # Avoid noisy logs; just a periodic heartbeat.
         rate = n / elapsed_s if elapsed_s > 0 else 0.0
         print(
@@ -191,7 +193,7 @@ def restore(
     runner = RestoreRunner(gmail=gmail, r2=r2, state=st)
 
     since_date = _parse_since(since)
-    def _progress(n: int, stats: object, elapsed_s: float) -> None:
+    def _progress(n: int, stats: RestoreStats, elapsed_s: float) -> None:
         rate = n / elapsed_s if elapsed_s > 0 else 0.0
         print(
             f"[restore] considered={n} rate={rate:.1f}/s "

@@ -96,10 +96,10 @@ class RestoreRunner:
             try:
                 msgid = (marker or {}).get("messageIdHeader")
                 raw_hash = (marker or {}).get("rawSha256")
-                restored_id = (marker or {}).get("restoredId")
+                marker_restored_id = (marker or {}).get("restoredId")
                 self._state.mark_restored(
                     source_message_id=source_id,
-                    restored_message_id=restored_id,
+                    restored_message_id=marker_restored_id,
                     message_id_header=msgid,
                     raw_sha256=raw_hash,
                 )
