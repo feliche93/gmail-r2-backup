@@ -4,10 +4,11 @@ import datetime as dt
 import gzip
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
-from typing import Optional
+from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
 
@@ -155,9 +156,13 @@ class RestoreRunner:
         apply: bool,
         since: dt.date | None = None,
         max_messages: int = 0,
+        progress_every: int = 0,
+        on_progress: Optional[Callable[[int, RestoreStats, float], None]] = None,
     ) -> RestoreStats:
         stats = RestoreStats()
         ids = self._iter_backed_up_message_ids()
+        started = time.monotonic()
+        last_report_n = 0
 
         for source_id in ids:
             if max_messages and stats.considered >= max_messages:
@@ -190,5 +195,10 @@ class RestoreRunner:
             except Exception:
                 stats.errors += 1
 
-        return stats
+            if progress_every and on_progress:
+                n = stats.considered
+                if n and (n % progress_every == 0) and n != last_report_n:
+                    last_report_n = n
+                    on_progress(n, stats, time.monotonic() - started)
 
+        return stats

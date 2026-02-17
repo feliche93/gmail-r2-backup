@@ -4,6 +4,7 @@ import datetime as dt
 import gzip
 import time
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 from .config import R2Config
 from .gmail import GmailClient
@@ -53,9 +54,18 @@ class BackupRunner:
         if remote:
             self._state.write_state(remote)
 
-    def run_backup(self, since: dt.date | None, max_messages: int = 0) -> BackupStats:
+    def run_backup(
+        self,
+        since: dt.date | None,
+        max_messages: int = 0,
+        *,
+        progress_every: int = 0,
+        on_progress: Optional[Callable[[str, int, BackupStats, float], None]] = None,
+    ) -> BackupStats:
         self._bootstrap_state_from_r2_if_needed()
         stats = BackupStats()
+        started = time.monotonic()
+        last_report_n = 0
 
         state = self._state.read_state()
         start_history_id = state.get("historyId")
@@ -77,6 +87,11 @@ class BackupRunner:
                                 stats.skipped += 1
                         except Exception:
                             stats.errors += 1
+                        if progress_every and on_progress:
+                            n = stats.uploaded + stats.skipped + stats.errors
+                            if n and (n % progress_every == 0) and n != last_report_n:
+                                last_report_n = n
+                                on_progress("history", n, stats, time.monotonic() - started)
                     if latest_hid:
                         self._state.write_state({"historyId": latest_hid})
             except Exception as e:
@@ -96,6 +111,11 @@ class BackupRunner:
                         stats.skipped += 1
                 except Exception:
                     stats.errors += 1
+                if progress_every and on_progress:
+                    n = stats.uploaded + stats.skipped + stats.errors
+                    if n and (n % progress_every == 0) and n != last_report_n:
+                        last_report_n = n
+                        on_progress("scan", n, stats, time.monotonic() - started)
 
             # Update historyId to current after scan so next run can be incremental.
             profile = self._gmail.get_profile()

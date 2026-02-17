@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Iterable
+import random
+import time
+from typing import Any, Iterable, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -23,10 +25,61 @@ class GmailClient:
         self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
 
     @staticmethod
+    def _error_reason(err: HttpError) -> str | None:
+        # Best-effort parse of Google API error payload.
+        try:
+            raw = getattr(err, "content", None)
+            if not raw:
+                return None
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            error = (data or {}).get("error") or {}
+            errors = error.get("errors") or []
+            if errors and isinstance(errors, list):
+                reason = (errors[0] or {}).get("reason")
+                if isinstance(reason, str):
+                    return reason
+            status = error.get("status")
+            if isinstance(status, str):
+                return status
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _should_retry(cls, err: HttpError) -> bool:
+        status = getattr(getattr(err, "resp", None), "status", None)
+        if status in (429, 500, 502, 503, 504):
+            return True
+        if status == 403:
+            reason = cls._error_reason(err)
+            if reason in ("rateLimitExceeded", "userRateLimitExceeded", "backendError"):
+                return True
+        return False
+
+    @classmethod
+    def _execute_with_retries(cls, req: Any, *, max_attempts: int = 8) -> Any:
+        delay_s = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return req.execute()
+            except HttpError as e:
+                if attempt >= max_attempts or not cls._should_retry(e):
+                    raise
+                # Exponential backoff with jitter, capped.
+                sleep_s = delay_s * (0.5 + random.random())
+                time.sleep(min(sleep_s, 60.0))
+                delay_s = min(delay_s * 2.0, 60.0)
+
+    @staticmethod
     def from_stored_token(token_store: StateStore, scopes: list[str]) -> "GmailClient":
         token_json = token_store.read_token_json()
         if not token_json:
-            raise SystemExit("No stored token found. Run: gmail-r2-backup auth --credentials <file>")
+            raise SystemExit(
+                "No stored token found. Run: gmail-r2-backup auth --credentials <file> "
+                "(or use --client-id/--client-secret)."
+            )
         creds = Credentials.from_authorized_user_info(token_json, scopes=scopes)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -44,8 +97,33 @@ class GmailClient:
         token_store.write_token_json(json.loads(creds.to_json()))
         return GmailClient(creds)
 
+    @staticmethod
+    def from_oauth_desktop_flow_client_secrets(
+        *,
+        client_id: str,
+        client_secret: str,
+        token_store: StateStore,
+        scopes: list[str],
+    ) -> "GmailClient":
+        # Equivalent to using a downloaded "Desktop app" client JSON, but lets users provide
+        # client_id/client_secret via env vars instead of a file.
+        cfg = {
+            "installed": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+        flow = InstalledAppFlow.from_client_config(cfg, scopes=scopes)
+        creds = flow.run_local_server(port=0)
+        token_store.write_token_json(json.loads(creds.to_json()))
+        return GmailClient(creds)
+
     def get_profile(self) -> dict[str, Any]:
-        return self._svc.users().getProfile(userId="me").execute()
+        req = self._svc.users().getProfile(userId="me")
+        return self._execute_with_retries(req)
 
     def list_messages(self, q: str | None = None, max_results: int = 0) -> Iterable[str]:
         # Yields message IDs
@@ -59,7 +137,7 @@ class GmailClient:
                 maxResults=500,
                 includeSpamTrash=True,
             )
-            resp = req.execute()
+            resp = self._execute_with_retries(req)
             for m in resp.get("messages", []) or []:
                 mid = m.get("id")
                 if not mid:
@@ -80,7 +158,7 @@ class GmailClient:
             historyTypes=["messageAdded"],
             maxResults=500,
         )
-        resp = req.execute()
+        resp = self._execute_with_retries(req)
         ids: list[str] = []
         for h in resp.get("history", []) or []:
             for added in h.get("messagesAdded", []) or []:
@@ -106,7 +184,7 @@ class GmailClient:
                 maxResults=500,
                 pageToken=page_token,
             )
-            resp = req.execute()
+            resp = self._execute_with_retries(req)
             ids: list[str] = []
             for h in resp.get("history", []) or []:
                 for added in h.get("messagesAdded", []) or []:
@@ -129,8 +207,8 @@ class GmailClient:
             self._svc.users()
             .messages()
             .get(userId="me", id=message_id, format="raw")
-            .execute()
         )
+        msg = self._execute_with_retries(msg)
         raw_b64 = msg.get("raw")
         if not raw_b64:
             raise ValueError("No raw content for message")
@@ -161,7 +239,7 @@ class GmailClient:
         body: dict[str, Any] = {"raw": raw_b64}
         if label_ids:
             body["labelIds"] = label_ids
-        return (
+        req = (
             self._svc.users()
             .messages()
             .insert(
@@ -169,8 +247,8 @@ class GmailClient:
                 internalDateSource=internal_date_source,
                 body=body,
             )
-            .execute()
         )
+        return self._execute_with_retries(req)
 
     def modify_labels(self, message_id: str, *, add: list[str] | None = None, remove: list[str] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {}
@@ -178,10 +256,12 @@ class GmailClient:
             body["addLabelIds"] = add
         if remove:
             body["removeLabelIds"] = remove
-        return self._svc.users().messages().modify(userId="me", id=message_id, body=body).execute()
+        req = self._svc.users().messages().modify(userId="me", id=message_id, body=body)
+        return self._execute_with_retries(req)
 
     def trash(self, message_id: str) -> dict[str, Any]:
-        return self._svc.users().messages().trash(userId="me", id=message_id).execute()
+        req = self._svc.users().messages().trash(userId="me", id=message_id)
+        return self._execute_with_retries(req)
 
     @staticmethod
     def is_history_too_old(err: Exception) -> bool:

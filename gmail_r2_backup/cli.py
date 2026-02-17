@@ -34,21 +34,53 @@ def _parse_since(s: Optional[str]) -> Optional[dt.date]:
 
 @app.command()
 def auth(
-    credentials: Path = typer.Option(..., "--credentials", help="Path to Google OAuth client JSON."),
+    credentials: Optional[Path] = typer.Option(
+        None,
+        "--credentials",
+        help="Path to Google OAuth client JSON (Desktop app).",
+    ),
+    client_id: Optional[str] = typer.Option(
+        None,
+        "--client-id",
+        envvar="GOOGLE_CLIENT_ID",
+        help="Google OAuth client id (Desktop app). Prefer env var GOOGLE_CLIENT_ID.",
+    ),
+    client_secret: Optional[str] = typer.Option(
+        None,
+        "--client-secret",
+        envvar="GOOGLE_CLIENT_SECRET",
+        help="Google OAuth client secret (Desktop app). Prefer env var GOOGLE_CLIENT_SECRET.",
+    ),
     write: bool = typer.Option(
         False,
         "--write",
         help="Request Gmail write scopes (needed for restore). Default is readonly for backup.",
     ),
 ) -> None:
+    if credentials and (client_id or client_secret):
+        raise typer.BadParameter("Use either --credentials OR --client-id/--client-secret (not both).")
+    if not credentials and (not client_id or not client_secret):
+        raise typer.BadParameter(
+            "Missing OAuth credentials. Provide --credentials <json> or both --client-id and --client-secret."
+        )
+
     cfg = load_app_config()
     r2 = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
-    gmail = GmailClient.from_oauth_desktop_flow(
-        credentials_path=str(credentials),
-        token_store=st,
-        scopes=[GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY] if write else [GmailClient.SCOPE_READONLY],
-    )
+    scopes = [GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY] if write else [GmailClient.SCOPE_READONLY]
+    if credentials:
+        gmail = GmailClient.from_oauth_desktop_flow(
+            credentials_path=str(credentials),
+            token_store=st,
+            scopes=scopes,
+        )
+    else:
+        gmail = GmailClient.from_oauth_desktop_flow_client_secrets(
+            client_id=str(client_id),
+            client_secret=str(client_secret),
+            token_store=st,
+            scopes=scopes,
+        )
     # Touch the profile to validate token and capture current history id for later runs.
     profile = gmail.get_profile()
     st.write_state({"historyId": profile.get("historyId"), "authedAt": int(time.time())})
@@ -70,6 +102,12 @@ def backup(
         min=0,
         help="Optional cap for testing (0 = unlimited).",
     ),
+    progress_every: int = typer.Option(
+        200,
+        "--progress-every",
+        min=0,
+        help="Print progress every N messages (0 disables).",
+    ),
 ) -> None:
     cfg = load_app_config()
     r2 = R2Config.from_env_or_config(cfg)
@@ -80,7 +118,21 @@ def backup(
     )
     runner = BackupRunner(gmail=gmail, r2=r2, state=st)
     since_date = _parse_since(since)
-    stats = runner.run_backup(since=since_date, max_messages=max_messages)
+    def _progress(phase: str, n: int, stats: object, elapsed_s: float) -> None:
+        # Avoid noisy logs; just a periodic heartbeat.
+        rate = n / elapsed_s if elapsed_s > 0 else 0.0
+        print(
+            f"[{phase}] processed={n} rate={rate:.1f}/s "
+            f"uploaded={getattr(stats, 'uploaded', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
+            file=sys.stderr,
+        )
+
+    stats = runner.run_backup(
+        since=since_date,
+        max_messages=max_messages,
+        progress_every=progress_every,
+        on_progress=_progress if progress_every else None,
+    )
     print(
         "Backup complete:",
         f"uploaded={stats.uploaded}",
@@ -108,6 +160,12 @@ def restore(
         min=0,
         help="Optional cap for testing (0 = unlimited).",
     ),
+    progress_every: int = typer.Option(
+        200,
+        "--progress-every",
+        min=0,
+        help="Print progress every N messages (0 disables).",
+    ),
 ) -> None:
     cfg = load_app_config()
     r2cfg = R2Config.from_env_or_config(cfg)
@@ -120,7 +178,21 @@ def restore(
     runner = RestoreRunner(gmail=gmail, r2=r2, state=st)
 
     since_date = _parse_since(since)
-    stats = runner.run_restore(apply=apply, since=since_date, max_messages=max_messages)
+    def _progress(n: int, stats: object, elapsed_s: float) -> None:
+        rate = n / elapsed_s if elapsed_s > 0 else 0.0
+        print(
+            f"[restore] considered={n} rate={rate:.1f}/s "
+            f"restored={getattr(stats, 'restored', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
+            file=sys.stderr,
+        )
+
+    stats = runner.run_restore(
+        apply=apply,
+        since=since_date,
+        max_messages=max_messages,
+        progress_every=progress_every,
+        on_progress=_progress if progress_every else None,
+    )
     mode = "RESTORE" if apply else "DRY-RUN"
     print(
         f"{mode} complete:",

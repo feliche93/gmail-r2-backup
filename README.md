@@ -75,6 +75,16 @@ Run (backup/read-only):
 gmail-r2-backup auth --credentials /path/to/credentials.json
 ```
 
+Alternative (no JSON file): set env vars and run without `--credentials`:
+
+```bash
+export GOOGLE_CLIENT_ID="..."
+export GOOGLE_CLIENT_SECRET="..."
+gmail-r2-backup auth
+```
+
+Note: passing `--client-secret ...` directly on the command line is supported, but not recommended because it may end up in shell history.
+
 Run (restore/write scopes):
 
 ```bash
