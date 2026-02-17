@@ -84,6 +84,41 @@ class GmailClient:
                 delay_s = min(delay_s * 2.0, 60.0)
 
     @staticmethod
+    def _normalize_scopes(v: Any) -> list[str] | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            parts = [p.strip() for p in v.split() if p.strip()]
+            return parts or None
+        if isinstance(v, list):
+            out: list[str] = []
+            for x in v:
+                if isinstance(x, str) and x.strip():
+                    out.append(x.strip())
+            return out or None
+        return None
+
+    @classmethod
+    def _satisfies_required_scopes(cls, granted: set[str], required: list[str]) -> bool:
+        # gmail.modify implies read access, and is generally sufficient for insert as well.
+        # Keep the mapping minimal and conservative; treat https://mail.google.com/ as full access.
+        full = "https://mail.google.com/"
+        for req in required:
+            if req == cls.SCOPE_READONLY:
+                if not (req in granted or cls.SCOPE_MODIFY in granted or full in granted):
+                    return False
+            elif req == cls.SCOPE_INSERT:
+                if not (req in granted or cls.SCOPE_MODIFY in granted or full in granted):
+                    return False
+            elif req == cls.SCOPE_MODIFY:
+                if not (req in granted or full in granted):
+                    return False
+            else:
+                if not (req in granted or full in granted):
+                    return False
+        return True
+
+    @staticmethod
     def from_stored_token(token_store: StateStore, scopes: list[str]) -> "GmailClient":
         token_json = token_store.read_token_json()
         if not token_json:
@@ -91,7 +126,22 @@ class GmailClient:
                 "No stored token found. Run: gmail-r2-backup auth --credentials <file> "
                 "(or use --client-id/--client-secret)."
             )
-        creds = Credentials.from_authorized_user_info(token_json, scopes=scopes)
+
+        # IMPORTANT:
+        # The refresh token is bound to the originally granted scopes. Passing a different
+        # scope set here can cause refresh to fail with "invalid_scope".
+        granted = GmailClient._normalize_scopes(token_json.get("scopes")) if isinstance(token_json, dict) else None
+        if granted:
+            if not GmailClient._satisfies_required_scopes(set(granted), scopes):
+                raise SystemExit(
+                    "Stored token is missing required scopes for this command. "
+                    "Re-run auth with the right scopes (e.g. `gmail-r2-backup auth --write ...`)."
+                )
+            effective_scopes = granted
+        else:
+            effective_scopes = scopes
+
+        creds = Credentials.from_authorized_user_info(token_json, scopes=effective_scopes)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
             token_store.write_token_json(json.loads(creds.to_json()))
