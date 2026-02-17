@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
@@ -79,76 +80,122 @@ class RestoreRunner:
         """
         Returns (restored_message_id, message_id_header, raw_sha256, did_restore)
         """
-        if self._state.was_restored(source_id):
+        # Cross-machine idempotency: if there's a restore marker in R2, trust it.
+        marker_key = f"state/restore/{source_id}.json"
+        marker = self._r2.get_json_or_none(marker_key)
+        if marker:
+            try:
+                msgid = (marker or {}).get("messageIdHeader")
+                raw_hash = (marker or {}).get("rawSha256")
+                restored_id = (marker or {}).get("restoredId")
+                self._state.mark_restored(
+                    source_message_id=source_id,
+                    restored_message_id=restored_id,
+                    message_id_header=msgid,
+                    raw_sha256=raw_hash,
+                )
+            except Exception:
+                pass
             return None, None, None, False
 
-        raw_gz = self._r2.get_bytes(f"messages/{source_id}.eml.gz")
-        raw_bytes = gzip.decompress(raw_gz)
-        raw_hash = _sha256(raw_bytes)
+        if self._state.was_restored(source_id):
+            return None, None, None, False
+        if not self._state.claim_restore(source_id):
+            return None, None, None, False
 
-        meta_obj = self._r2.get_json_or_none(f"messages/{source_id}.json") or {}
-        meta = parse_message_meta(meta_obj)
-        label_ids = meta.label_ids()
+        try:
+            raw_gz = self._r2.get_bytes(f"messages/{source_id}.eml.gz")
+            raw_bytes = gzip.decompress(raw_gz)
+            raw_hash = _sha256(raw_bytes)
 
-        msgid = _extract_message_id_header(raw_bytes)
-        if msgid and self._is_present_in_gmail_by_msgid(msgid):
+            meta_obj = self._r2.get_json_or_none(f"messages/{source_id}.json") or {}
+            meta = parse_message_meta(meta_obj)
+            label_ids = meta.label_ids()
+
+            msgid = _extract_message_id_header(raw_bytes)
+            if msgid and self._is_present_in_gmail_by_msgid(msgid):
+                self._state.mark_restored(
+                    source_message_id=source_id,
+                    restored_message_id=None,
+                    message_id_header=msgid,
+                    raw_sha256=raw_hash,
+                )
+                if apply:
+                    self._r2.put_json(
+                        marker_key,
+                        {
+                            "status": "present",
+                            "sourceId": source_id,
+                            "messageIdHeader": msgid,
+                            "rawSha256": raw_hash,
+                            "checkedAt": int(time.time()),
+                        },
+                    )
+                return None, msgid, raw_hash, False
+
+            if not apply:
+                return None, msgid, raw_hash, True
+
+            restored_id: str | None = None
+            try:
+                inserted = self._gmail.insert_message_raw(
+                    raw_bytes,
+                    label_ids=label_ids or None,
+                    internal_date_source="dateHeader",
+                )
+                restored_id = inserted.get("id")
+            except HttpError as e:
+                # Some system labels can cause insert failures. Retry without labelIds,
+                # then re-apply what we can via modify/trash.
+                if getattr(getattr(e, "resp", None), "status", None) not in (400, 403):
+                    raise
+                inserted = self._gmail.insert_message_raw(
+                    raw_bytes,
+                    label_ids=None,
+                    internal_date_source="dateHeader",
+                )
+                restored_id = inserted.get("id")
+
+            if restored_id:
+                # Best-effort re-apply labels and special locations.
+                # Note: Some system labels may be restricted; failures are ignored per "skip silently".
+                try:
+                    if label_ids:
+                        self._gmail.modify_labels(restored_id, add=label_ids)
+                except Exception:
+                    pass
+                try:
+                    if "TRASH" in (label_ids or []):
+                        self._gmail.trash(restored_id)
+                except Exception:
+                    pass
+                try:
+                    if "SPAM" in (label_ids or []):
+                        self._gmail.modify_labels(restored_id, add=["SPAM"])
+                except Exception:
+                    pass
+
             self._state.mark_restored(
                 source_message_id=source_id,
-                restored_message_id=None,
+                restored_message_id=restored_id,
                 message_id_header=msgid,
                 raw_sha256=raw_hash,
             )
-            return None, msgid, raw_hash, False
-
-        if not apply:
-            return None, msgid, raw_hash, True
-
-        restored_id: str | None = None
-        try:
-            inserted = self._gmail.insert_message_raw(
-                raw_bytes,
-                label_ids=label_ids or None,
-                internal_date_source="dateHeader",
-            )
-            restored_id = inserted.get("id")
-        except HttpError as e:
-            # Some system labels can cause insert failures. Retry without labelIds,
-            # then re-apply what we can via modify/trash.
-            if getattr(getattr(e, "resp", None), "status", None) not in (400, 403):
-                raise
-            inserted = self._gmail.insert_message_raw(
-                raw_bytes,
-                label_ids=None,
-                internal_date_source="dateHeader",
-            )
-            restored_id = inserted.get("id")
-
-        if restored_id:
-            # Best-effort re-apply labels and special locations.
-            # Note: Some system labels may be restricted; failures are ignored per "skip silently".
-            try:
-                if label_ids:
-                    self._gmail.modify_labels(restored_id, add=label_ids)
-            except Exception:
-                pass
-            try:
-                if "TRASH" in (label_ids or []):
-                    self._gmail.trash(restored_id)
-            except Exception:
-                pass
-            try:
-                if "SPAM" in (label_ids or []):
-                    self._gmail.modify_labels(restored_id, add=["SPAM"])
-            except Exception:
-                pass
-
-        self._state.mark_restored(
-            source_message_id=source_id,
-            restored_message_id=restored_id,
-            message_id_header=msgid,
-            raw_sha256=raw_hash,
-        )
-        return restored_id, msgid, raw_hash, True
+            if apply:
+                self._r2.put_json(
+                    marker_key,
+                    {
+                        "status": "inserted",
+                        "sourceId": source_id,
+                        "restoredId": restored_id,
+                        "messageIdHeader": msgid,
+                        "rawSha256": raw_hash,
+                        "restoredAt": int(time.time()),
+                    },
+                )
+            return restored_id, msgid, raw_hash, True
+        finally:
+            self._state.release_restore_claim(source_id)
 
     def run_restore(
         self,
@@ -156,6 +203,7 @@ class RestoreRunner:
         apply: bool,
         since: dt.date | None = None,
         max_messages: int = 0,
+        workers: int = 1,
         progress_every: int = 0,
         on_progress: Optional[Callable[[int, RestoreStats, float], None]] = None,
     ) -> RestoreStats:
@@ -164,41 +212,61 @@ class RestoreRunner:
         started = time.monotonic()
         last_report_n = 0
 
-        for source_id in ids:
-            if max_messages and stats.considered >= max_messages:
-                break
+        def _filter_ids() -> list[str]:
+            out: list[str] = []
+            for source_id in ids:
+                if max_messages and len(out) >= max_messages:
+                    break
+                if since:
+                    meta_obj = self._r2.get_json_or_none(f"messages/{source_id}.json") or {}
+                    meta = parse_message_meta(meta_obj)
+                    try:
+                        if meta.internalDate:
+                            ts_ms = int(meta.internalDate)
+                            d = dt.datetime.fromtimestamp(ts_ms / 1000.0, tz=dt.timezone.utc).date()
+                            if d < since:
+                                continue
+                    except Exception:
+                        pass
+                out.append(source_id)
+            return out
 
-            # Optional filter: compare against backed-up internalDate if present (ms since epoch).
-            if since:
-                meta_obj = self._r2.get_json_or_none(f"messages/{source_id}.json") or {}
-                meta = parse_message_meta(meta_obj)
+        work_ids = _filter_ids()
+
+        if workers <= 1:
+            for source_id in work_ids:
+                stats.considered += 1
                 try:
-                    if meta.internalDate:
-                        ts_ms = int(meta.internalDate)
-                        d = dt.datetime.fromtimestamp(ts_ms / 1000.0, tz=dt.timezone.utc).date()
-                        if d < since:
-                            continue
-                except Exception:
-                    pass
-
-            stats.considered += 1
-            try:
-                _restored_id, _msgid, _raw_hash, did_restore = self._restore_one(source_id, apply=apply)
-                if did_restore:
-                    if apply:
+                    _restored_id, _msgid, _raw_hash, did_restore = self._restore_one(source_id, apply=apply)
+                    if did_restore:
                         stats.restored += 1
                     else:
-                        # dry-run counts this as "would restore"
-                        stats.restored += 1
-                else:
-                    stats.skipped += 1
-            except Exception:
-                stats.errors += 1
+                        stats.skipped += 1
+                except Exception:
+                    stats.errors += 1
 
-            if progress_every and on_progress:
-                n = stats.considered
-                if n and (n % progress_every == 0) and n != last_report_n:
-                    last_report_n = n
-                    on_progress(n, stats, time.monotonic() - started)
+                if progress_every and on_progress:
+                    n = stats.considered
+                    if n and (n % progress_every == 0) and n != last_report_n:
+                        last_report_n = n
+                        on_progress(n, stats, time.monotonic() - started)
+        else:
+            with ThreadPoolExecutor(max_workers=int(workers)) as ex:
+                futs = {ex.submit(self._restore_one, sid, apply=apply): sid for sid in work_ids}
+                for fut in as_completed(futs):
+                    stats.considered += 1
+                    try:
+                        _restored_id, _msgid, _raw_hash, did_restore = fut.result()
+                        if did_restore:
+                            stats.restored += 1
+                        else:
+                            stats.skipped += 1
+                    except Exception:
+                        stats.errors += 1
+                    if progress_every and on_progress:
+                        n = stats.considered
+                        if n and (n % progress_every == 0) and n != last_report_n:
+                            last_report_n = n
+                            on_progress(n, stats, time.monotonic() - started)
 
         return stats

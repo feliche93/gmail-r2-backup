@@ -108,6 +108,12 @@ Subsequent runs use Gmail History for incrementals:
 gmail-r2-backup backup
 ```
 
+Progress and concurrency (defaults are safe, tune as needed):
+
+```bash
+gmail-r2-backup backup --workers 4 --progress-every 200
+```
+
 ## Periodic mode
 
 Run forever, backing up every 15 minutes:
@@ -138,6 +144,17 @@ Apply restore (writes to Gmail):
 ```bash
 gmail-r2-backup restore --apply
 ```
+
+Restore can also run concurrently:
+
+```bash
+gmail-r2-backup restore --apply --workers 4 --progress-every 200
+```
+
+Idempotency notes:
+- Backup is idempotent: it keeps a local sqlite index of uploaded message IDs and also persists state to R2.
+- Restore is best-effort idempotent: it skips messages already present when `Message-ID` exists and records a local restore index.
+  In addition, successful restore operations write per-message restore markers back to R2 under `state/restore/` so re-running from another machine won't duplicate work.
 
 ## Storage layout in R2
 

@@ -25,6 +25,8 @@ class StateStore:
     def _init_db(self) -> None:
         con = sqlite3.connect(self._db_path)
         try:
+            con.execute("pragma journal_mode=WAL")
+            con.execute("pragma synchronous=NORMAL")
             con.execute(
                 """
                 create table if not exists messages (
@@ -34,6 +36,15 @@ class StateStore:
                 """
             )
             con.execute("create index if not exists idx_messages_uploaded_at on messages(uploaded_at)")
+            con.execute(
+                """
+                create table if not exists inflight_uploads (
+                  id text primary key,
+                  claimed_at integer not null
+                )
+                """
+            )
+            con.execute("create index if not exists idx_inflight_uploads_claimed_at on inflight_uploads(claimed_at)")
             con.execute(
                 """
                 create table if not exists restored (
@@ -46,6 +57,15 @@ class StateStore:
                 """
             )
             con.execute("create index if not exists idx_restored_restored_at on restored(restored_at)")
+            con.execute(
+                """
+                create table if not exists inflight_restores (
+                  source_id text primary key,
+                  claimed_at integer not null
+                )
+                """
+            )
+            con.execute("create index if not exists idx_inflight_restores_claimed_at on inflight_restores(claimed_at)")
             con.commit()
         finally:
             con.close()
@@ -91,6 +111,53 @@ class StateStore:
         finally:
             con.close()
 
+    def claim_upload(self, message_id: str, *, stale_after_s: int = 6 * 3600) -> bool:
+        """
+        Claims a message for upload work to avoid duplicate uploads when running concurrently.
+
+        Returns True if the caller should proceed with the upload.
+        Returns False if already uploaded or recently claimed by another worker.
+        """
+        now = int(time.time())
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("begin immediate")
+            row = con.execute("select 1 from messages where id = ?", (message_id,)).fetchone()
+            if row is not None:
+                con.execute("commit")
+                return False
+
+            cur = con.execute(
+                "insert into inflight_uploads(id, claimed_at) values(?, ?) on conflict(id) do nothing",
+                (message_id, now),
+            )
+            if cur.rowcount == 1:
+                con.execute("commit")
+                return True
+
+            # Existing claim: allow reclaim if stale.
+            row = con.execute("select claimed_at from inflight_uploads where id = ?", (message_id,)).fetchone()
+            claimed_at = int(row[0]) if row else 0
+            if claimed_at and (now - claimed_at) > stale_after_s:
+                con.execute("update inflight_uploads set claimed_at = ? where id = ?", (now, message_id))
+                con.execute("commit")
+                return True
+
+            con.execute("commit")
+            return False
+        finally:
+            con.close()
+
+    def release_upload_claim(self, message_id: str) -> None:
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("delete from inflight_uploads where id = ?", (message_id,))
+            con.commit()
+        finally:
+            con.close()
+
     def mark_uploaded(self, message_id: str) -> None:
         con = sqlite3.connect(self._db_path)
         try:
@@ -108,6 +175,51 @@ class StateStore:
         try:
             row = con.execute("select 1 from restored where source_id = ?", (source_message_id,)).fetchone()
             return row is not None
+        finally:
+            con.close()
+
+    def claim_restore(self, source_message_id: str, *, stale_after_s: int = 6 * 3600) -> bool:
+        """
+        Claims a message for restore work to avoid duplicates when running concurrently.
+        """
+        now = int(time.time())
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("begin immediate")
+            row = con.execute("select 1 from restored where source_id = ?", (source_message_id,)).fetchone()
+            if row is not None:
+                con.execute("commit")
+                return False
+
+            cur = con.execute(
+                "insert into inflight_restores(source_id, claimed_at) values(?, ?) on conflict(source_id) do nothing",
+                (source_message_id, now),
+            )
+            if cur.rowcount == 1:
+                con.execute("commit")
+                return True
+
+            row = con.execute(
+                "select claimed_at from inflight_restores where source_id = ?", (source_message_id,)
+            ).fetchone()
+            claimed_at = int(row[0]) if row else 0
+            if claimed_at and (now - claimed_at) > stale_after_s:
+                con.execute("update inflight_restores set claimed_at = ? where source_id = ?", (now, source_message_id))
+                con.execute("commit")
+                return True
+
+            con.execute("commit")
+            return False
+        finally:
+            con.close()
+
+    def release_restore_claim(self, source_message_id: str) -> None:
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("delete from inflight_restores where source_id = ?", (source_message_id,))
+            con.commit()
         finally:
             con.close()
 

@@ -4,6 +4,7 @@ import datetime as dt
 import gzip
 import time
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 from .config import R2Config
@@ -31,16 +32,19 @@ class BackupRunner:
         return f"after:{since.strftime('%Y/%m/%d')}"
 
     def _upload_message(self, message_id: str) -> bool:
-        if self._state.was_uploaded(message_id):
+        # Claim first for concurrency safety; release claim on exit.
+        if not self._state.claim_upload(message_id):
             return False
+        try:
+            raw, meta = self._gmail.get_message_raw(message_id)
+            raw_gz = gzip.compress(raw, compresslevel=6)
 
-        raw, meta = self._gmail.get_message_raw(message_id)
-        raw_gz = gzip.compress(raw, compresslevel=6)
-
-        self._r2.put_bytes(f"messages/{message_id}.eml.gz", raw_gz, content_type="application/gzip")
-        self._r2.put_json(f"messages/{message_id}.json", meta)
-        self._state.mark_uploaded(message_id)
-        return True
+            self._r2.put_bytes(f"messages/{message_id}.eml.gz", raw_gz, content_type="application/gzip")
+            self._r2.put_json(f"messages/{message_id}.json", meta)
+            self._state.mark_uploaded(message_id)
+            return True
+        finally:
+            self._state.release_upload_claim(message_id)
 
     def _persist_state_to_r2(self) -> None:
         st = self._state.read_state()
@@ -59,6 +63,7 @@ class BackupRunner:
         since: dt.date | None,
         max_messages: int = 0,
         *,
+        workers: int = 1,
         progress_every: int = 0,
         on_progress: Optional[Callable[[str, int, BackupStats, float], None]] = None,
     ) -> BackupStats:
@@ -79,19 +84,37 @@ class BackupRunner:
                     max_results=max_messages or 0,
                 ):
                     used_history = True
-                    for mid in ids:
-                        try:
-                            if self._upload_message(mid):
-                                stats.uploaded += 1
-                            else:
-                                stats.skipped += 1
-                        except Exception:
-                            stats.errors += 1
-                        if progress_every and on_progress:
-                            n = stats.uploaded + stats.skipped + stats.errors
-                            if n and (n % progress_every == 0) and n != last_report_n:
-                                last_report_n = n
-                                on_progress("history", n, stats, time.monotonic() - started)
+                    if workers <= 1:
+                        mids = ids
+                        for mid in mids:
+                            try:
+                                if self._upload_message(mid):
+                                    stats.uploaded += 1
+                                else:
+                                    stats.skipped += 1
+                            except Exception:
+                                stats.errors += 1
+                            if progress_every and on_progress:
+                                n = stats.uploaded + stats.skipped + stats.errors
+                                if n and (n % progress_every == 0) and n != last_report_n:
+                                    last_report_n = n
+                                    on_progress("history", n, stats, time.monotonic() - started)
+                    else:
+                        with ThreadPoolExecutor(max_workers=int(workers)) as ex:
+                            futs = {ex.submit(self._upload_message, mid): mid for mid in ids}
+                            for fut in as_completed(futs):
+                                try:
+                                    if fut.result():
+                                        stats.uploaded += 1
+                                    else:
+                                        stats.skipped += 1
+                                except Exception:
+                                    stats.errors += 1
+                                if progress_every and on_progress:
+                                    n = stats.uploaded + stats.skipped + stats.errors
+                                    if n and (n % progress_every == 0) and n != last_report_n:
+                                        last_report_n = n
+                                        on_progress("history", n, stats, time.monotonic() - started)
                     if latest_hid:
                         self._state.write_state({"historyId": latest_hid})
             except Exception as e:
@@ -103,19 +126,55 @@ class BackupRunner:
         if not used_history:
             # Fallback scan: query-based list. (Used on first run or if history is too old.)
             q = self._gmail_query_since(since) if since else None
-            for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
-                try:
-                    if self._upload_message(mid):
-                        stats.uploaded += 1
-                    else:
-                        stats.skipped += 1
-                except Exception:
-                    stats.errors += 1
-                if progress_every and on_progress:
-                    n = stats.uploaded + stats.skipped + stats.errors
-                    if n and (n % progress_every == 0) and n != last_report_n:
-                        last_report_n = n
-                        on_progress("scan", n, stats, time.monotonic() - started)
+            if workers <= 1:
+                for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
+                    try:
+                        if self._upload_message(mid):
+                            stats.uploaded += 1
+                        else:
+                            stats.skipped += 1
+                    except Exception:
+                        stats.errors += 1
+                    if progress_every and on_progress:
+                        n = stats.uploaded + stats.skipped + stats.errors
+                        if n and (n % progress_every == 0) and n != last_report_n:
+                            last_report_n = n
+                            on_progress("scan", n, stats, time.monotonic() - started)
+            else:
+                # Producer/consumer: submit as we enumerate IDs to avoid loading all IDs in memory.
+                with ThreadPoolExecutor(max_workers=int(workers)) as ex:
+                    pending = set()
+                    for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
+                        pending.add(ex.submit(self._upload_message, mid))
+                        if len(pending) >= int(workers) * 4:
+                            done = {f for f in pending if f.done()}
+                            for f in done:
+                                pending.remove(f)
+                                try:
+                                    if f.result():
+                                        stats.uploaded += 1
+                                    else:
+                                        stats.skipped += 1
+                                except Exception:
+                                    stats.errors += 1
+                                if progress_every and on_progress:
+                                    n = stats.uploaded + stats.skipped + stats.errors
+                                    if n and (n % progress_every == 0) and n != last_report_n:
+                                        last_report_n = n
+                                        on_progress("scan", n, stats, time.monotonic() - started)
+                    for f in as_completed(pending):
+                        try:
+                            if f.result():
+                                stats.uploaded += 1
+                            else:
+                                stats.skipped += 1
+                        except Exception:
+                            stats.errors += 1
+                        if progress_every and on_progress:
+                            n = stats.uploaded + stats.skipped + stats.errors
+                            if n and (n % progress_every == 0) and n != last_report_n:
+                                last_report_n = n
+                                on_progress("scan", n, stats, time.monotonic() - started)
 
             # Update historyId to current after scan so next run can be incremental.
             profile = self._gmail.get_profile()

@@ -102,6 +102,12 @@ def backup(
         min=0,
         help="Optional cap for testing (0 = unlimited).",
     ),
+    workers: int = typer.Option(
+        4,
+        "--workers",
+        min=1,
+        help="Number of concurrent worker threads for fetch+upload.",
+    ),
     progress_every: int = typer.Option(
         200,
         "--progress-every",
@@ -130,6 +136,7 @@ def backup(
     stats = runner.run_backup(
         since=since_date,
         max_messages=max_messages,
+        workers=workers,
         progress_every=progress_every,
         on_progress=_progress if progress_every else None,
     )
@@ -159,6 +166,12 @@ def restore(
         "--max-messages",
         min=0,
         help="Optional cap for testing (0 = unlimited).",
+    ),
+    workers: int = typer.Option(
+        4,
+        "--workers",
+        min=1,
+        help="Number of concurrent worker threads for restore work.",
     ),
     progress_every: int = typer.Option(
         200,
@@ -190,6 +203,7 @@ def restore(
         apply=apply,
         since=since_date,
         max_messages=max_messages,
+        workers=workers,
         progress_every=progress_every,
         on_progress=_progress if progress_every else None,
     )
