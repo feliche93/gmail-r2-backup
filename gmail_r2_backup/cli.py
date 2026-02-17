@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Optional
 
 import typer
 
-from .config import R2Config, load_app_config
+from .config import AppConfig, R2Config, load_app_config
 from .gmail import GmailClient
 from .backup import BackupRunner
 from .backup import BackupStats
@@ -16,6 +17,7 @@ from .r2 import R2Client
 from .restore import RestoreRunner
 from .restore import RestoreStats
 from .state import StateStore
+from .naming import r2_prefix_from_email
 
 
 app = typer.Typer(
@@ -32,6 +34,45 @@ def _parse_since(s: Optional[str]) -> Optional[dt.date]:
         return dt.date.fromisoformat(s)
     except ValueError as e:
         raise typer.BadParameter("Expected YYYY-MM-DD") from e
+
+
+def _load_dotenv() -> None:
+    # Convenience for local usage. Does not override existing environment by default.
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        return
+
+
+def _prefix_is_explicit(cfg: AppConfig) -> bool:
+    # Treat prefix as explicit if it is present (even if empty).
+    if "R2_PREFIX" in os.environ:
+        return True
+    try:
+        return cfg.r2 is not None and cfg.r2.prefix is not None
+    except Exception:
+        return False
+
+
+def _maybe_auto_prefix(
+    *,
+    r2cfg: R2Config,
+    state: StateStore,
+    gmail: GmailClient,
+    enabled: bool,
+    explicit: bool,
+) -> R2Config:
+    if not enabled or explicit:
+        return r2cfg
+    email = state.read_state().get("emailAddress")
+    if not isinstance(email, str) or not email:
+        profile = gmail.get_profile()
+        email = profile.get("emailAddress")
+    if not isinstance(email, str) or not email:
+        return r2cfg
+    return r2cfg.model_copy(update={"prefix": r2_prefix_from_email(email)})
 
 
 @app.command()
@@ -59,6 +100,7 @@ def auth(
         help="Request Gmail write scopes (needed for restore). Default is readonly for backup.",
     ),
 ) -> None:
+    _load_dotenv()
     if credentials and (client_id or client_secret):
         raise typer.BadParameter("Use either --credentials OR --client-id/--client-secret (not both).")
     if not credentials and (not client_id or not client_secret):
@@ -85,7 +127,13 @@ def auth(
         )
     # Touch the profile to validate token and capture current history id for later runs.
     profile = gmail.get_profile()
-    st.write_state({"historyId": profile.get("historyId"), "authedAt": int(time.time())})
+    st.write_state(
+        {
+            "historyId": profile.get("historyId"),
+            "emailAddress": profile.get("emailAddress"),
+            "authedAt": int(time.time()),
+        }
+    )
     print("OAuth OK. Current historyId:", profile.get("historyId"))
     # r2 is loaded just to validate env/config early; no calls.
     _ = r2
@@ -110,6 +158,11 @@ def backup(
         min=1,
         help="Number of concurrent worker threads for fetch+upload.",
     ),
+    auto_prefix: bool = typer.Option(
+        False,
+        "--auto-prefix",
+        help="Derive R2_PREFIX from the authenticated Gmail address if no prefix is explicitly set.",
+    ),
     progress_every: int = typer.Option(
         200,
         "--progress-every",
@@ -117,6 +170,7 @@ def backup(
         help="Print progress every N messages (0 disables).",
     ),
 ) -> None:
+    _load_dotenv()
     cfg = load_app_config()
     r2 = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
@@ -124,6 +178,7 @@ def backup(
         token_store=st,
         scopes=[GmailClient.SCOPE_READONLY],
     )
+    r2 = _maybe_auto_prefix(r2cfg=r2, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
     runner = BackupRunner(gmail=gmail, r2=r2, state=st)
     since_date = _parse_since(since)
     def _progress(phase: str, n: int, stats: BackupStats, elapsed_s: float) -> None:
@@ -179,6 +234,11 @@ def restore(
         min=1,
         help="Number of concurrent worker threads for restore work.",
     ),
+    auto_prefix: bool = typer.Option(
+        False,
+        "--auto-prefix",
+        help="Derive R2_PREFIX from the authenticated Gmail address if no prefix is explicitly set.",
+    ),
     progress_every: int = typer.Option(
         200,
         "--progress-every",
@@ -186,6 +246,7 @@ def restore(
         help="Print progress every N messages (0 disables).",
     ),
 ) -> None:
+    _load_dotenv()
     cfg = load_app_config()
     r2cfg = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
@@ -193,6 +254,7 @@ def restore(
         token_store=st,
         scopes=[GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY],
     )
+    r2cfg = _maybe_auto_prefix(r2cfg=r2cfg, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
     r2 = R2Client(r2cfg)
     runner = RestoreRunner(gmail=gmail, r2=r2, state=st)
 
@@ -234,10 +296,12 @@ def daemon(
     every: int = typer.Option(..., "--every", min=30, help="Interval in seconds (>= 30)."),
     since: Optional[str] = typer.Option(None, "--since", help="Same as backup --since (used for fallback scans)."),
     max_messages: int = typer.Option(0, "--max-messages", min=0),
+    workers: int = typer.Option(4, "--workers", min=1),
+    auto_prefix: bool = typer.Option(False, "--auto-prefix"),
 ) -> None:
     while True:
         try:
-            backup(since=since, max_messages=max_messages)
+            backup(since=since, max_messages=max_messages, workers=workers, auto_prefix=auto_prefix)
         except typer.Exit as e:
             # backup() uses Exit(code=2) to signal "completed with errors".
             if getattr(e, "exit_code", 0) not in (0, None):
@@ -254,6 +318,7 @@ def daemon(
 def main(argv: Optional[list[str]] = None) -> None:
     # Keep a main() entrypoint for the console_script in pyproject.toml.
     # Typer/Click handle exit codes via exceptions.
+    _load_dotenv()
     app(prog_name="gmail-r2-backup", args=argv)
 
 

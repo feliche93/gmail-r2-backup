@@ -27,9 +27,11 @@ gmail-r2-backup backup --help
   - `gmail-r2-backup backup`
   - `gmail-r2-backup backup --since YYYY-MM-DD` (limits fallback scan)
   - `gmail-r2-backup backup --max-messages N` (dev/test cap)
+  - For multi-account buckets: `gmail-r2-backup backup --auto-prefix`
 - Restore from R2 back into Gmail:
   - Dry-run: `gmail-r2-backup restore`
   - Apply: `gmail-r2-backup restore --apply`
+  - If backup used `--auto-prefix`: use it on restore too.
 - Simple loop mode:
   - `gmail-r2-backup daemon --every 900`
 

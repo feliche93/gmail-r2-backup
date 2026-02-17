@@ -50,6 +50,8 @@ export R2_BUCKET="my-bucket"
 export R2_PREFIX="gmail-backup"
 ```
 
+Tip: the CLI auto-loads a local `.env` file if present (and `.env` is in `.gitignore`).
+
 The endpoint is derived from `R2_ACCOUNT_ID`:
 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
 
@@ -121,6 +123,12 @@ Subsequent runs use Gmail History for incrementals:
 gmail-r2-backup backup
 ```
 
+If you back up multiple Gmail accounts into the same bucket, you can derive `R2_PREFIX` automatically from the authenticated Gmail address:
+
+```bash
+gmail-r2-backup backup --auto-prefix
+```
+
 Progress and concurrency (defaults are safe, tune as needed):
 
 ```bash
@@ -156,6 +164,12 @@ Apply restore (writes to Gmail):
 
 ```bash
 gmail-r2-backup restore --apply
+```
+
+If the backup used `--auto-prefix`, restore must also use it:
+
+```bash
+gmail-r2-backup restore --apply --auto-prefix
 ```
 
 Restore can also run concurrently:
