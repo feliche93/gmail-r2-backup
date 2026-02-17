@@ -19,10 +19,16 @@ Python CLI that backs up a consumer Gmail account to Cloudflare R2 (S3-compatibl
 
 ```bash
 cd gmail-r2-backup
-python3 -m venv .venv
+
+# Recommended: uv (fast Python package manager)
+uv sync
 source .venv/bin/activate
-pip install -U pip
-pip install -e .
+
+# Alternatively: pip
+# python3 -m venv .venv
+# source .venv/bin/activate
+# pip install -U pip
+# pip install -e .
 ```
 
 ## Configure R2

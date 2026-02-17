@@ -24,6 +24,17 @@ class GmailClient:
         self._creds = creds
         self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
 
+    def clone(self) -> "GmailClient":
+        """
+        Create a new GmailClient with independent underlying HTTP/service objects.
+
+        This avoids sharing googleapiclient Resource instances across threads.
+        """
+        info = json.loads(self._creds.to_json())
+        scopes = list(self._creds.scopes) if getattr(self._creds, "scopes", None) else None
+        creds = Credentials.from_authorized_user_info(info, scopes=scopes)
+        return GmailClient(creds)
+
     @staticmethod
     def _error_reason(err: HttpError) -> str | None:
         # Best-effort parse of Google API error payload.

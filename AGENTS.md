@@ -10,10 +10,8 @@ The CLI uses [Typer](https://typer.tiangolo.com/) (Click-based). Prefer keeping 
 
 ```bash
 cd <repo-root>
-python3 -m venv .venv
+uv sync
 source .venv/bin/activate
-pip install -U pip
-pip install -e .
 
 # CLI help
 gmail-r2-backup --help

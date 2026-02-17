@@ -5,6 +5,7 @@ import gzip
 import time
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from typing import Callable, Optional
 
 from .config import R2Config
@@ -26,6 +27,16 @@ class BackupRunner:
         self._r2cfg = r2
         self._state = state
         self._r2 = R2Client(r2)
+        self._worker_local = threading.local()
+
+    def _gmail_worker(self) -> GmailClient:
+        # googleapiclient service objects are not guaranteed thread-safe.
+        # Use one GmailClient per worker thread.
+        c = getattr(self._worker_local, "gmail", None)
+        if c is None:
+            c = self._gmail.clone()
+            self._worker_local.gmail = c
+        return c
 
     def _gmail_query_since(self, since: dt.date) -> str:
         # Gmail query supports after:YYYY/MM/DD (interpreted in account timezone).
@@ -36,7 +47,7 @@ class BackupRunner:
         if not self._state.claim_upload(message_id):
             return False
         try:
-            raw, meta = self._gmail.get_message_raw(message_id)
+            raw, meta = self._gmail_worker().get_message_raw(message_id)
             raw_gz = gzip.compress(raw, compresslevel=6)
 
             self._r2.put_bytes(f"messages/{message_id}.eml.gz", raw_gz, content_type="application/gzip")

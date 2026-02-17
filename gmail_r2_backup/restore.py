@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
@@ -52,6 +53,14 @@ class RestoreRunner:
         self._gmail = gmail
         self._r2 = r2
         self._state = state
+        self._worker_local = threading.local()
+
+    def _gmail_worker(self) -> GmailClient:
+        c = getattr(self._worker_local, "gmail", None)
+        if c is None:
+            c = self._gmail.clone()
+            self._worker_local.gmail = c
+        return c
 
     def _iter_backed_up_message_ids(self) -> list[str]:
         # Each message has messages/<id>.eml.gz and messages/<id>.json
@@ -72,7 +81,7 @@ class RestoreRunner:
         # Gmail search operator: rfc822msgid:
         # This is the best available stable dedupe key for restores.
         q = f"rfc822msgid:{msgid}"
-        for _mid in self._gmail.search_message_ids(q=q, max_results=1):
+        for _mid in self._gmail_worker().search_message_ids(q=q, max_results=1):
             return True
         return False
 
@@ -138,7 +147,7 @@ class RestoreRunner:
 
             restored_id: str | None = None
             try:
-                inserted = self._gmail.insert_message_raw(
+                inserted = self._gmail_worker().insert_message_raw(
                     raw_bytes,
                     label_ids=label_ids or None,
                     internal_date_source="dateHeader",
@@ -149,7 +158,7 @@ class RestoreRunner:
                 # then re-apply what we can via modify/trash.
                 if getattr(getattr(e, "resp", None), "status", None) not in (400, 403):
                     raise
-                inserted = self._gmail.insert_message_raw(
+                inserted = self._gmail_worker().insert_message_raw(
                     raw_bytes,
                     label_ids=None,
                     internal_date_source="dateHeader",
@@ -161,17 +170,17 @@ class RestoreRunner:
                 # Note: Some system labels may be restricted; failures are ignored per "skip silently".
                 try:
                     if label_ids:
-                        self._gmail.modify_labels(restored_id, add=label_ids)
+                        self._gmail_worker().modify_labels(restored_id, add=label_ids)
                 except Exception:
                     pass
                 try:
                     if "TRASH" in (label_ids or []):
-                        self._gmail.trash(restored_id)
+                        self._gmail_worker().trash(restored_id)
                 except Exception:
                     pass
                 try:
                     if "SPAM" in (label_ids or []):
-                        self._gmail.modify_labels(restored_id, add=["SPAM"])
+                        self._gmail_worker().modify_labels(restored_id, add=["SPAM"])
                 except Exception:
                     pass
 
