@@ -1,0 +1,22 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Local credentials/config (never commit)
+credentials.json
+token.json
+state.json
+index.sqlite3
+

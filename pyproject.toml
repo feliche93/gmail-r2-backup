@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmail-r2-backup"
+version = "0.1.0"
+description = "Back up a consumer Gmail account to Cloudflare R2 (S3-compatible) using the Gmail API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "gmail-r2-backup contributors" }]
+dependencies = [
+  "boto3>=1.28",
+  "google-api-python-client>=2.120",
+  "google-auth>=2.20",
+  "google-auth-oauthlib>=1.2",
+  "platformdirs>=4.0",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "typer>=0.9",
+]
+
+[project.scripts]
+gmail-r2-backup = "gmail_r2_backup.cli:main"
+
+[tool.setuptools]
+packages = ["gmail_r2_backup"]
