@@ -4,9 +4,12 @@ import datetime as dt
 import gzip
 import time
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import threading
+from dataclasses import field
 from typing import Callable, Optional
+
+from botocore.exceptions import ClientError
 
 from .config import R2Config
 from .gmail import GmailClient
@@ -19,6 +22,19 @@ class BackupStats:
     uploaded: int = 0
     skipped: int = 0
     errors: int = 0
+    error_samples: list[str] = field(default_factory=list)
+
+
+def _error_summary(exc: Exception) -> str:
+    # Keep output safe/sanitized: no secrets, no message bodies.
+    if isinstance(exc, ClientError):
+        code = ((exc.response or {}).get("Error") or {}).get("Code")
+        return f"ClientError(code={code})"
+    # HttpError content may include request/response details; keep it minimal.
+    if type(exc).__name__ == "HttpError":
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        return f"HttpError(status={status})"
+    return exc.__class__.__name__
 
 
 class BackupRunner:
@@ -82,6 +98,12 @@ class BackupRunner:
         stats = BackupStats()
         started = time.monotonic()
         last_report_n = 0
+        max_error_samples = 10
+
+        def record_error(mid: str, exc: Exception) -> None:
+            stats.errors += 1
+            if len(stats.error_samples) < max_error_samples:
+                stats.error_samples.append(f"{mid}: {_error_summary(exc)}")
 
         state = self._state.read_state()
         start_history_id = state.get("historyId")
@@ -103,8 +125,8 @@ class BackupRunner:
                                     stats.uploaded += 1
                                 else:
                                     stats.skipped += 1
-                            except Exception:
-                                stats.errors += 1
+                            except Exception as exc:
+                                record_error(mid, exc)
                             if progress_every and on_progress:
                                 n = stats.uploaded + stats.skipped + stats.errors
                                 if n and (n % progress_every == 0) and n != last_report_n:
@@ -114,13 +136,14 @@ class BackupRunner:
                         with ThreadPoolExecutor(max_workers=int(workers)) as ex:
                             futs = {ex.submit(self._upload_message, mid): mid for mid in ids}
                             for fut in as_completed(futs):
+                                mid = futs[fut]
                                 try:
                                     if fut.result():
                                         stats.uploaded += 1
                                     else:
                                         stats.skipped += 1
-                                except Exception:
-                                    stats.errors += 1
+                                except Exception as exc:
+                                    record_error(mid, exc)
                                 if progress_every and on_progress:
                                     n = stats.uploaded + stats.skipped + stats.errors
                                     if n and (n % progress_every == 0) and n != last_report_n:
@@ -144,8 +167,8 @@ class BackupRunner:
                             stats.uploaded += 1
                         else:
                             stats.skipped += 1
-                    except Exception:
-                        stats.errors += 1
+                    except Exception as exc:
+                        record_error(mid, exc)
                     if progress_every and on_progress:
                         n = stats.uploaded + stats.skipped + stats.errors
                         if n and (n % progress_every == 0) and n != last_report_n:
@@ -154,33 +177,35 @@ class BackupRunner:
             else:
                 # Producer/consumer: submit as we enumerate IDs to avoid loading all IDs in memory.
                 with ThreadPoolExecutor(max_workers=int(workers)) as ex:
-                    pending = set()
+                    pending: dict[Future[bool], str] = {}
                     for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
-                        pending.add(ex.submit(self._upload_message, mid))
+                        fut = ex.submit(self._upload_message, mid)
+                        pending[fut] = mid
                         if len(pending) >= int(workers) * 4:
-                            done = {f for f in pending if f.done()}
+                            done = [f for f in list(pending.keys()) if f.done()]
                             for f in done:
-                                pending.remove(f)
+                                f_mid = pending.pop(f, "?")
                                 try:
                                     if f.result():
                                         stats.uploaded += 1
                                     else:
                                         stats.skipped += 1
-                                except Exception:
-                                    stats.errors += 1
+                                except Exception as exc:
+                                    record_error(f_mid, exc)
                                 if progress_every and on_progress:
                                     n = stats.uploaded + stats.skipped + stats.errors
                                     if n and (n % progress_every == 0) and n != last_report_n:
                                         last_report_n = n
                                         on_progress("scan", n, stats, time.monotonic() - started)
-                    for f in as_completed(pending):
+                    for f in as_completed(list(pending.keys())):
+                        f_mid = pending.get(f, "?")
                         try:
                             if f.result():
                                 stats.uploaded += 1
                             else:
                                 stats.skipped += 1
-                        except Exception:
-                            stats.errors += 1
+                        except Exception as exc:
+                            record_error(f_mid, exc)
                         if progress_every and on_progress:
                             n = stats.uploaded + stats.skipped + stats.errors
                             if n and (n % progress_every == 0) and n != last_report_n:

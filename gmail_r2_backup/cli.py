@@ -148,6 +148,10 @@ def backup(
         f"skipped={stats.skipped}",
         f"errors={stats.errors}",
     )
+    if stats.errors and getattr(stats, "error_samples", None):
+        print("Sample errors:", file=sys.stderr)
+        for s in stats.error_samples:
+            print(f"- {s}", file=sys.stderr)
     if stats.errors != 0:
         raise typer.Exit(code=2)
 
@@ -217,6 +221,10 @@ def restore(
         f"skipped={stats.skipped}",
         f"errors={stats.errors}",
     )
+    if stats.errors and getattr(stats, "error_samples", None):
+        print("Sample errors:", file=sys.stderr)
+        for s in stats.error_samples:
+            print(f"- {s}", file=sys.stderr)
     if apply and stats.errors != 0:
         raise typer.Exit(code=2)
 

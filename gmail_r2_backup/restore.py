@@ -6,6 +6,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
+from dataclasses import field
 from email import policy
 from email.parser import BytesParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +14,7 @@ import threading
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
+from botocore.exceptions import ClientError
 
 from .gmail import GmailClient
 from .models import parse_message_meta
@@ -26,6 +28,17 @@ class RestoreStats:
     restored: int = 0
     skipped: int = 0
     errors: int = 0
+    error_samples: list[str] = field(default_factory=list)
+
+
+def _error_summary(exc: Exception) -> str:
+    if isinstance(exc, ClientError):
+        code = ((exc.response or {}).get("Error") or {}).get("Code")
+        return f"ClientError(code={code})"
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        return f"HttpError(status={status})"
+    return exc.__class__.__name__
 
 
 _MSGID_CLEAN = re.compile(r"^<(.+)>$")
@@ -103,7 +116,8 @@ class RestoreRunner:
                     message_id_header=msgid,
                     raw_sha256=raw_hash,
                 )
-            except Exception:
+            except (TypeError, ValueError, KeyError):
+                # Marker is untrusted input; ignore and proceed with normal restore checks.
                 pass
             return None, None, None, False
 
@@ -171,17 +185,17 @@ class RestoreRunner:
                 try:
                     if label_ids:
                         self._gmail_worker().modify_labels(restored_id, add=label_ids)
-                except Exception:
+                except (HttpError, ClientError):
                     pass
                 try:
                     if "TRASH" in (label_ids or []):
                         self._gmail_worker().trash(restored_id)
-                except Exception:
+                except (HttpError, ClientError):
                     pass
                 try:
                     if "SPAM" in (label_ids or []):
                         self._gmail_worker().modify_labels(restored_id, add=["SPAM"])
-                except Exception:
+                except (HttpError, ClientError):
                     pass
 
             self._state.mark_restored(
@@ -220,6 +234,12 @@ class RestoreRunner:
         ids = self._iter_backed_up_message_ids()
         started = time.monotonic()
         last_report_n = 0
+        max_error_samples = 10
+
+        def record_error(source_id: str, exc: Exception) -> None:
+            stats.errors += 1
+            if len(stats.error_samples) < max_error_samples:
+                stats.error_samples.append(f"{source_id}: {_error_summary(exc)}")
 
         def _filter_ids() -> list[str]:
             out: list[str] = []
@@ -235,7 +255,7 @@ class RestoreRunner:
                             d = dt.datetime.fromtimestamp(ts_ms / 1000.0, tz=dt.timezone.utc).date()
                             if d < since:
                                 continue
-                    except Exception:
+                    except (ValueError, TypeError, OSError):
                         pass
                 out.append(source_id)
             return out
@@ -251,8 +271,8 @@ class RestoreRunner:
                         stats.restored += 1
                     else:
                         stats.skipped += 1
-                except Exception:
-                    stats.errors += 1
+                except Exception as exc:
+                    record_error(source_id, exc)
 
                 if progress_every and on_progress:
                     n = stats.considered
@@ -263,6 +283,7 @@ class RestoreRunner:
             with ThreadPoolExecutor(max_workers=int(workers)) as ex:
                 futs = {ex.submit(self._restore_one, sid, apply=apply): sid for sid in work_ids}
                 for fut in as_completed(futs):
+                    source_id = futs[fut]
                     stats.considered += 1
                     try:
                         _restored_id, _msgid, _raw_hash, did_restore = fut.result()
@@ -270,8 +291,8 @@ class RestoreRunner:
                             stats.restored += 1
                         else:
                             stats.skipped += 1
-                    except Exception:
-                        stats.errors += 1
+                    except Exception as exc:
+                        record_error(source_id, exc)
                     if progress_every and on_progress:
                         n = stats.considered
                         if n and (n % progress_every == 0) and n != last_report_n:
