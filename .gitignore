@@ -19,4 +19,5 @@ credentials.json
 token.json
 state.json
 index.sqlite3
-
+.env
+.env.*
