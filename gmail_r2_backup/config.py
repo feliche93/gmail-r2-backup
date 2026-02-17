@@ -19,6 +19,7 @@ class R2FileConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     account_id: Optional[str] = None
+    endpoint_url: Optional[str] = None
     bucket: Optional[str] = None
     prefix: Optional[str] = None
     region: Optional[str] = None
@@ -46,6 +47,7 @@ class _R2Env(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     account_id: Optional[str] = Field(default=None, validation_alias="R2_ACCOUNT_ID")
+    endpoint_url: Optional[str] = Field(default=None, validation_alias="R2_ENDPOINT_URL")
     bucket: Optional[str] = Field(default=None, validation_alias="R2_BUCKET")
     prefix: Optional[str] = Field(default=None, validation_alias="R2_PREFIX")
     region: Optional[str] = Field(default=None, validation_alias="R2_REGION")
@@ -64,17 +66,19 @@ class R2Config(BaseModel):
         env = _R2Env()
         file_r2 = cfg.r2 or R2FileConfig()
 
+        endpoint_url = env.endpoint_url or file_r2.endpoint_url
         account_id = env.account_id or file_r2.account_id
         bucket = env.bucket or file_r2.bucket
         prefix = env.prefix or file_r2.prefix or "gmail-backup"
         region = env.region or file_r2.region or "auto"
 
-        if not account_id:
-            raise SystemExit("Missing R2_ACCOUNT_ID (or config r2.account_id)")
+        if not endpoint_url and not account_id:
+            raise SystemExit("Missing R2_ENDPOINT_URL or R2_ACCOUNT_ID (or config r2.endpoint_url / r2.account_id)")
         if not bucket:
             raise SystemExit("Missing R2_BUCKET (or config r2.bucket)")
 
-        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+        if not endpoint_url:
+            endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
         return R2Config(
             endpoint_url=endpoint_url,
             bucket=bucket,

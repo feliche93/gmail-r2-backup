@@ -44,6 +44,7 @@ Set env vars (recommended):
 
 ```bash
 export R2_ACCOUNT_ID="..."
+export R2_ENDPOINT_URL=""   # optional override, e.g. https://<account>.<jurisdiction>.r2.cloudflarestorage.com
 export AWS_ACCESS_KEY_ID="..."
 export AWS_SECRET_ACCESS_KEY="..."
 export R2_BUCKET="my-bucket"
@@ -52,8 +53,10 @@ export R2_PREFIX="gmail-backup"
 
 Tip: the CLI auto-loads a local `.env` file if present (and `.env` is in `.gitignore`).
 
-The endpoint is derived from `R2_ACCOUNT_ID`:
+The endpoint is derived from `R2_ACCOUNT_ID` by default:
 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
+
+If you're using a jurisdiction-specific endpoint (for example `...eu.r2.cloudflarestorage.com`), set `R2_ENDPOINT_URL` explicitly.
 
 ## Authenticate Gmail
 
