@@ -5,6 +5,7 @@ import os
 import sqlite3
 import time
 from typing import Any
+import contextlib
 
 from platformdirs import user_data_dir
 
@@ -15,12 +16,71 @@ class StateStore:
         self._state_path = os.path.join(root_dir, "state.json")
         self._token_path = os.path.join(root_dir, "token.json")
         self._db_path = os.path.join(root_dir, "index.sqlite3")
+        self._lock_path = os.path.join(root_dir, "run.lock")
         os.makedirs(root_dir, exist_ok=True)
         self._init_db()
 
     @staticmethod
     def open_default() -> "StateStore":
         return StateStore(os.path.join(user_data_dir("gmail-r2-backup"), "state"))
+
+    @contextlib.contextmanager
+    def run_lock(self) -> Any:
+        """
+        Prevent running multiple instances against the same local state directory.
+
+        This also makes it safe to clear inflight claim rows on startup.
+        """
+        with open(self._lock_path, "w", encoding="utf-8") as f:
+            # Best-effort diagnostic: leave the current PID in the lock file.
+            try:
+                f.seek(0)
+                f.truncate()
+                f.write(str(os.getpid()))
+                f.flush()
+            except Exception:
+                pass
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt_mod: Any = msvcrt
+
+                    # Lock first byte; ensure file has at least one byte.
+                    try:
+                        if f.tell() == 0:
+                            f.write("0")
+                            f.flush()
+                            f.seek(0)
+                    except Exception:
+                        pass
+                    msvcrt_mod.locking(f.fileno(), msvcrt_mod.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as e:
+                raise SystemExit("Another gmail-r2-backup process is already running for this state dir.") from e
+            except OSError as e:
+                raise SystemExit("Another gmail-r2-backup process is already running for this state dir.") from e
+            try:
+                yield
+            finally:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt_mod2: Any = msvcrt
+
+                        try:
+                            f.seek(0)
+                        except Exception:
+                            pass
+                        msvcrt_mod2.locking(f.fileno(), msvcrt_mod2.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
 
     def _init_db(self) -> None:
         con = sqlite3.connect(self._db_path)
@@ -175,6 +235,15 @@ class StateStore:
         finally:
             con.close()
 
+    def clear_inflight_uploads(self) -> None:
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("delete from inflight_uploads")
+            con.commit()
+        finally:
+            con.close()
+
     def mark_uploaded(self, message_id: str) -> None:
         con = sqlite3.connect(self._db_path)
         try:
@@ -236,6 +305,15 @@ class StateStore:
         try:
             con.execute("pragma busy_timeout=30000")
             con.execute("delete from inflight_restores where source_id = ?", (source_message_id,))
+            con.commit()
+        finally:
+            con.close()
+
+    def clear_inflight_restores(self) -> None:
+        con = sqlite3.connect(self._db_path, timeout=30)
+        try:
+            con.execute("pragma busy_timeout=30000")
+            con.execute("delete from inflight_restores")
             con.commit()
         finally:
             con.close()

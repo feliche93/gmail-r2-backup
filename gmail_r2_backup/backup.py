@@ -38,12 +38,13 @@ def _error_summary(exc: Exception) -> str:
 
 
 class BackupRunner:
-    def __init__(self, gmail: GmailClient, r2: R2Config, state: StateStore):
+    def __init__(self, gmail: GmailClient, r2: R2Config, state: StateStore, *, gzip_level: int = 6):
         self._gmail = gmail
         self._r2cfg = r2
         self._state = state
         self._r2 = R2Client(r2)
         self._worker_local = threading.local()
+        self._gzip_level = int(gzip_level)
 
     def _gmail_worker(self) -> GmailClient:
         # googleapiclient service objects are not guaranteed thread-safe.
@@ -64,7 +65,7 @@ class BackupRunner:
             return False
         try:
             raw, meta = self._gmail_worker().get_message_raw(message_id)
-            raw_gz = gzip.compress(raw, compresslevel=6)
+            raw_gz = gzip.compress(raw, compresslevel=self._gzip_level)
 
             self._r2.put_bytes(f"messages/{message_id}.eml.gz", raw_gz, content_type="application/gzip")
             self._r2.put_json(f"messages/{message_id}.json", meta)

@@ -154,6 +154,13 @@ def backup(
         min=1,
         help="Number of concurrent worker threads for fetch+upload.",
     ),
+    gzip_level: int = typer.Option(
+        6,
+        "--gzip-level",
+        min=1,
+        max=9,
+        help="Gzip compression level (1=fastest, 9=smallest). Lower is faster.",
+    ),
     auto_prefix: bool = typer.Option(
         False,
         "--auto-prefix",
@@ -170,41 +177,44 @@ def backup(
     cfg = load_app_config()
     r2 = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
-    gmail = GmailClient.from_stored_token(
-        token_store=st,
-        scopes=[GmailClient.SCOPE_READONLY],
-    )
-    r2 = _maybe_auto_prefix(r2cfg=r2, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
-    runner = BackupRunner(gmail=gmail, r2=r2, state=st)
-    since_date = _parse_since(since)
-    def _progress(phase: str, n: int, stats: BackupStats, elapsed_s: float) -> None:
-        # Avoid noisy logs; just a periodic heartbeat.
-        rate = n / elapsed_s if elapsed_s > 0 else 0.0
-        print(
-            f"[{phase}] processed={n} rate={rate:.1f}/s "
-            f"uploaded={getattr(stats, 'uploaded', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
-            file=sys.stderr,
+    with st.run_lock():
+        st.clear_inflight_uploads()
+        gmail = GmailClient.from_stored_token(
+            token_store=st,
+            scopes=[GmailClient.SCOPE_READONLY],
         )
+        r2 = _maybe_auto_prefix(r2cfg=r2, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
+        runner = BackupRunner(gmail=gmail, r2=r2, state=st, gzip_level=gzip_level)
+        since_date = _parse_since(since)
 
-    stats = runner.run_backup(
-        since=since_date,
-        max_messages=max_messages,
-        workers=workers,
-        progress_every=progress_every,
-        on_progress=_progress if progress_every else None,
-    )
-    print(
-        "Backup complete:",
-        f"uploaded={stats.uploaded}",
-        f"skipped={stats.skipped}",
-        f"errors={stats.errors}",
-    )
-    if stats.errors and getattr(stats, "error_samples", None):
-        print("Sample errors:", file=sys.stderr)
-        for s in stats.error_samples:
-            print(f"- {s}", file=sys.stderr)
-    if stats.errors != 0:
-        raise typer.Exit(code=2)
+        def _progress(phase: str, n: int, stats: BackupStats, elapsed_s: float) -> None:
+            # Avoid noisy logs; just a periodic heartbeat.
+            rate = n / elapsed_s if elapsed_s > 0 else 0.0
+            print(
+                f"[{phase}] processed={n} rate={rate:.1f}/s "
+                f"uploaded={getattr(stats, 'uploaded', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
+                file=sys.stderr,
+            )
+
+        stats = runner.run_backup(
+            since=since_date,
+            max_messages=max_messages,
+            workers=workers,
+            progress_every=progress_every,
+            on_progress=_progress if progress_every else None,
+        )
+        print(
+            "Backup complete:",
+            f"uploaded={stats.uploaded}",
+            f"skipped={stats.skipped}",
+            f"errors={stats.errors}",
+        )
+        if stats.errors and getattr(stats, "error_samples", None):
+            print("Sample errors:", file=sys.stderr)
+            for s in stats.error_samples:
+                print(f"- {s}", file=sys.stderr)
+        if stats.errors != 0:
+            raise typer.Exit(code=2)
 
 @app.command()
 def restore(
@@ -246,45 +256,48 @@ def restore(
     cfg = load_app_config()
     r2cfg = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
-    gmail = GmailClient.from_stored_token(
-        token_store=st,
-        scopes=[GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY],
-    )
-    r2cfg = _maybe_auto_prefix(r2cfg=r2cfg, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
-    r2 = R2Client(r2cfg)
-    runner = RestoreRunner(gmail=gmail, r2=r2, state=st)
-
-    since_date = _parse_since(since)
-    def _progress(n: int, stats: RestoreStats, elapsed_s: float) -> None:
-        rate = n / elapsed_s if elapsed_s > 0 else 0.0
-        print(
-            f"[restore] considered={n} rate={rate:.1f}/s "
-            f"restored={getattr(stats, 'restored', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
-            file=sys.stderr,
+    with st.run_lock():
+        st.clear_inflight_restores()
+        gmail = GmailClient.from_stored_token(
+            token_store=st,
+            scopes=[GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY],
         )
+        r2cfg = _maybe_auto_prefix(r2cfg=r2cfg, state=st, gmail=gmail, enabled=auto_prefix, explicit=_prefix_is_explicit(cfg))
+        r2 = R2Client(r2cfg)
+        runner = RestoreRunner(gmail=gmail, r2=r2, state=st)
 
-    stats = runner.run_restore(
-        apply=apply,
-        since=since_date,
-        max_messages=max_messages,
-        workers=workers,
-        progress_every=progress_every,
-        on_progress=_progress if progress_every else None,
-    )
-    mode = "RESTORE" if apply else "DRY-RUN"
-    print(
-        f"{mode} complete:",
-        f"considered={stats.considered}",
-        f"restored={stats.restored}",
-        f"skipped={stats.skipped}",
-        f"errors={stats.errors}",
-    )
-    if stats.errors and getattr(stats, "error_samples", None):
-        print("Sample errors:", file=sys.stderr)
-        for s in stats.error_samples:
-            print(f"- {s}", file=sys.stderr)
-    if apply and stats.errors != 0:
-        raise typer.Exit(code=2)
+        since_date = _parse_since(since)
+
+        def _progress(n: int, stats: RestoreStats, elapsed_s: float) -> None:
+            rate = n / elapsed_s if elapsed_s > 0 else 0.0
+            print(
+                f"[restore] considered={n} rate={rate:.1f}/s "
+                f"restored={getattr(stats, 'restored', '?')} skipped={getattr(stats, 'skipped', '?')} errors={getattr(stats, 'errors', '?')}",
+                file=sys.stderr,
+            )
+
+        stats = runner.run_restore(
+            apply=apply,
+            since=since_date,
+            max_messages=max_messages,
+            workers=workers,
+            progress_every=progress_every,
+            on_progress=_progress if progress_every else None,
+        )
+        mode = "RESTORE" if apply else "DRY-RUN"
+        print(
+            f"{mode} complete:",
+            f"considered={stats.considered}",
+            f"restored={stats.restored}",
+            f"skipped={stats.skipped}",
+            f"errors={stats.errors}",
+        )
+        if stats.errors and getattr(stats, "error_samples", None):
+            print("Sample errors:", file=sys.stderr)
+            for s in stats.error_samples:
+                print(f"- {s}", file=sys.stderr)
+        if apply and stats.errors != 0:
+            raise typer.Exit(code=2)
 
 
 @app.command()
