@@ -99,6 +99,7 @@ class BackupRunner:
         started = time.monotonic()
         last_report_n = 0
         max_error_samples = 10
+        listed = 0
 
         def record_error(mid: str, exc: Exception) -> None:
             stats.errors += 1
@@ -107,11 +108,11 @@ class BackupRunner:
 
         state = self._state.read_state()
         start_history_id = state.get("historyId")
-        has_local_index = self._state.has_uploaded_any()
+        full_scan_complete = bool(state.get("fullScanComplete"))
 
         # Prefer incremental history-based backup when possible.
         used_history = False
-        if start_history_id and has_local_index:
+        if start_history_id and full_scan_complete:
             try:
                 for ids, latest_hid in self._gmail.history_message_added_paged(
                     start_history_id=str(start_history_id),
@@ -163,6 +164,7 @@ class BackupRunner:
             q = self._gmail_query_since(since) if since else None
             if workers <= 1:
                 for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
+                    listed += 1
                     try:
                         if self._upload_message(mid):
                             stats.uploaded += 1
@@ -180,6 +182,7 @@ class BackupRunner:
                 with ThreadPoolExecutor(max_workers=int(workers)) as ex:
                     pending: dict[Future[bool], str] = {}
                     for mid in self._gmail.list_messages(q=q, max_results=max_messages or 0):
+                        listed += 1
                         fut = ex.submit(self._upload_message, mid)
                         pending[fut] = mid
                         if len(pending) >= int(workers) * 4:
@@ -213,10 +216,15 @@ class BackupRunner:
                                 last_report_n = n
                                 on_progress("scan", n, stats, time.monotonic() - started)
 
-            # Update historyId to current after scan so next run can be incremental.
-            profile = self._gmail.get_profile()
-            if profile.get("historyId"):
-                self._state.write_state({"historyId": profile.get("historyId")})
+            # If the scan was capped, keep scanning on future runs (do not switch to history-based incrementals yet).
+            scan_capped = bool(max_messages) and listed >= int(max_messages)
+            self._state.write_state({"fullScanComplete": not scan_capped})
+
+            if not scan_capped:
+                # Update historyId to current after scan so next run can be incremental.
+                profile = self._gmail.get_profile()
+                if profile.get("historyId"):
+                    self._state.write_state({"historyId": profile.get("historyId")})
 
         self._state.write_state({"lastRunAt": int(time.time())})
         self._persist_state_to_r2()
