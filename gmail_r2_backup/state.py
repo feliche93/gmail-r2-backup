@@ -109,6 +109,17 @@ class StateStore:
         return cur
 
     # ---- uploaded index ----
+    def uploaded_count(self) -> int:
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute("select count(1) from messages").fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            con.close()
+
+    def has_uploaded_any(self) -> bool:
+        return self.uploaded_count() > 0
+
     def was_uploaded(self, message_id: str) -> bool:
         con = sqlite3.connect(self._db_path)
         try:

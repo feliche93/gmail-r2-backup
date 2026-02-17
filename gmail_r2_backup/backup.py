@@ -107,10 +107,11 @@ class BackupRunner:
 
         state = self._state.read_state()
         start_history_id = state.get("historyId")
+        has_local_index = self._state.has_uploaded_any()
 
         # Prefer incremental history-based backup when possible.
         used_history = False
-        if start_history_id:
+        if start_history_id and has_local_index:
             try:
                 for ids, latest_hid in self._gmail.history_message_added_paged(
                     start_history_id=str(start_history_id),

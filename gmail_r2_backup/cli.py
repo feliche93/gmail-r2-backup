@@ -108,8 +108,6 @@ def auth(
             "Missing OAuth credentials. Provide --credentials <json> or both --client-id and --client-secret."
         )
 
-    cfg = load_app_config()
-    r2 = R2Config.from_env_or_config(cfg)
     st = StateStore.open_default()
     scopes = [GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY] if write else [GmailClient.SCOPE_READONLY]
     if credentials:
@@ -124,7 +122,7 @@ def auth(
             client_secret=str(client_secret),
             token_store=st,
             scopes=scopes,
-        )
+    )
     # Touch the profile to validate token and capture current history id for later runs.
     profile = gmail.get_profile()
     st.write_state(
@@ -135,8 +133,6 @@ def auth(
         }
     )
     print("OAuth OK. Current historyId:", profile.get("historyId"))
-    # r2 is loaded just to validate env/config early; no calls.
-    _ = r2
 
 
 @app.command()

@@ -33,3 +33,10 @@ def test_claim_restore_idempotent(state_store, monkeypatch) -> None:
     state_store.mark_restored(source_message_id="s1", restored_message_id="r1", message_id_header=None, raw_sha256=None)
     assert state_store.claim_restore("s1") is False
 
+
+def test_uploaded_count_and_has_uploaded_any(state_store) -> None:
+    assert state_store.uploaded_count() == 0
+    assert state_store.has_uploaded_any() is False
+    state_store.mark_uploaded("m1")
+    assert state_store.uploaded_count() == 1
+    assert state_store.has_uploaded_any() is True
