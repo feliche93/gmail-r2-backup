@@ -5,6 +5,13 @@ services:
     # container, override it so the container stays up and Scheduled Tasks can exec the CLI.
     entrypoint: ["/bin/sh", "-lc"]
     command: ["sleep infinity"]
+    healthcheck:
+      # No HTTP server here. We just validate the CLI is runnable and dependencies are intact.
+      test: ["CMD-SHELL", "gmail-r2-backup --help >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     environment:
       # Set these in Coolify (recommended) or via a local .env file.
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}

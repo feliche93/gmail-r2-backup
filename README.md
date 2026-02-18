@@ -218,3 +218,5 @@ gmail-r2-backup backup --state-dir /state/felix.vemmer@gmail.com --workers 12 --
 The OAuth flow opens a browser, so you typically run `auth` locally and then copy the generated `token.json` into the server's `/state/<account>/` directory.
 
 Note: the provided `docker-compose.yml` overrides the Dockerfile entrypoint to run `sleep infinity` so the container stays up for Scheduled Tasks. If you change the Compose file, keep that pattern.
+
+The Compose file also defines a simple `healthcheck` (runs `gmail-r2-backup --help`) so Coolify can mark the worker container as healthy.
