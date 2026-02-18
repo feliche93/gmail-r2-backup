@@ -112,8 +112,12 @@ class BackupRunner:
         full_scan_complete = bool(state.get("fullScanComplete"))
 
         # Prefer incremental history-based backup when possible.
+        #
+        # Safety: don't use history mode until we have *some* uploaded index locally.
+        # A fresh (or accidentally copied) state.json could contain historyId/fullScanComplete
+        # that would otherwise make us skip the initial full scan.
         used_history = False
-        if start_history_id and full_scan_complete:
+        if start_history_id and full_scan_complete and self._state.has_uploaded_any():
             try:
                 for ids, latest_hid in self._gmail.history_message_added_paged(
                     start_history_id=str(start_history_id),

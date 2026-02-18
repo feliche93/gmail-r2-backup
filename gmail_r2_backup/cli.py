@@ -142,6 +142,8 @@ def auth(
             "historyId": profile.get("historyId"),
             "emailAddress": profile.get("emailAddress"),
             "authedAt": int(time.time()),
+            # New auth should not imply "we already scanned everything".
+            "fullScanComplete": False,
         }
     )
     print("OAuth OK. Current historyId:", profile.get("historyId"))
