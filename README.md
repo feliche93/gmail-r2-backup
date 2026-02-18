@@ -196,3 +196,23 @@ Idempotency notes:
 
 - Incrementals track "message added" events. Label-only changes and deletions are not currently represented.
 - If Gmail returns `404` on history (startHistoryId too old), the tool falls back to a query-based scan.
+
+## Deploy on Coolify (scheduled backups, multi-account)
+
+This works well as a "worker" container with Coolify Scheduled Tasks.
+
+1. Deploy this repo with the included `Dockerfile` (or `docker-compose.yml` in Compose mode).
+2. Mount a persistent volume at `/state` so tokens and the sqlite index survive redeploys.
+3. Set runtime env vars in Coolify:
+   - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+   - `R2_BUCKET`, `R2_ENDPOINT_URL` (and optional `R2_REGION`)
+   - Do not set `R2_PREFIX` if you want to use `--auto-prefix` for multiple accounts.
+4. Create one Scheduled Task per Gmail account, each using a different `--state-dir` under `/state`:
+
+```bash
+gmail-r2-backup backup --state-dir /state/felix.vemmer@gmail.com --workers 12 --gzip-level 1 --progress-every 200 --auto-prefix
+```
+
+### OAuth bootstrapping in Coolify
+
+The OAuth flow opens a browser, so you typically run `auth` locally and then copy the generated `token.json` into the server's `/state/<account>/` directory.
