@@ -3,7 +3,8 @@ services:
     build: .
     # Dockerfile sets ENTRYPOINT to `gmail-r2-backup`. For a long-running Coolify "worker"
     # container, override it so the container stays up and Scheduled Tasks can exec the CLI.
-    entrypoint: ["/bin/sh", "-lc"]
+    # Use `-c` (not `-lc`) to avoid resetting PATH via login shell profiles.
+    entrypoint: ["/bin/sh", "-c"]
     command: ["sleep infinity"]
     healthcheck:
       # No HTTP server here. We just validate the CLI is runnable and dependencies are intact.
@@ -13,6 +14,8 @@ services:
       retries: 3
       start_period: 10s
     environment:
+      # Ensure scheduled tasks can call `gmail-r2-backup` without an absolute path.
+      - PATH=/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       # Set these in Coolify (recommended) or via a local .env file.
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
