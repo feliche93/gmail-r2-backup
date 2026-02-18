@@ -216,3 +216,5 @@ gmail-r2-backup backup --state-dir /state/felix.vemmer@gmail.com --workers 12 --
 ### OAuth bootstrapping in Coolify
 
 The OAuth flow opens a browser, so you typically run `auth` locally and then copy the generated `token.json` into the server's `/state/<account>/` directory.
+
+Note: the provided `docker-compose.yml` overrides the Dockerfile entrypoint to run `sleep infinity` so the container stays up for Scheduled Tasks. If you change the Compose file, keep that pattern.
