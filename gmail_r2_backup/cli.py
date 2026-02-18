@@ -76,9 +76,19 @@ def _maybe_auto_prefix(
         return r2cfg
     return r2cfg.model_copy(update={"prefix": r2_prefix_from_email(email)})
 
+def _open_state(state_dir: Optional[Path]) -> StateStore:
+    if state_dir:
+        return StateStore(str(state_dir))
+    return StateStore.open_default()
+
 
 @app.command()
 def auth(
+    state_dir: Optional[Path] = typer.Option(
+        None,
+        "--state-dir",
+        help="Directory for local state (token.json, state.json, index.sqlite3). Use one per Gmail account.",
+    ),
     credentials: Optional[Path] = typer.Option(
         None,
         "--credentials",
@@ -110,7 +120,7 @@ def auth(
             "Missing OAuth credentials. Provide --credentials <json> or both --client-id and --client-secret."
         )
 
-    st = StateStore.open_default()
+    st = _open_state(state_dir)
     scopes = [GmailClient.SCOPE_INSERT, GmailClient.SCOPE_MODIFY] if write else [GmailClient.SCOPE_READONLY]
     if credentials:
         gmail = GmailClient.from_oauth_desktop_flow(
@@ -139,6 +149,11 @@ def auth(
 
 @app.command()
 def backup(
+    state_dir: Optional[Path] = typer.Option(
+        None,
+        "--state-dir",
+        help="Directory for local state (token.json, state.json, index.sqlite3). Use one per Gmail account.",
+    ),
     since: Optional[str] = typer.Option(
         None,
         "--since",
@@ -178,7 +193,7 @@ def backup(
     _load_dotenv()
     cfg = load_app_config()
     r2 = R2Config.from_env_or_config(cfg)
-    st = StateStore.open_default()
+    st = _open_state(state_dir)
     with st.run_lock():
         st.clear_inflight_uploads()
         gmail = GmailClient.from_stored_token(
@@ -220,6 +235,11 @@ def backup(
 
 @app.command()
 def restore(
+    state_dir: Optional[Path] = typer.Option(
+        None,
+        "--state-dir",
+        help="Directory for local state (token.json, state.json, index.sqlite3). Use one per Gmail account.",
+    ),
     apply: bool = typer.Option(
         False,
         "--apply",
@@ -257,7 +277,7 @@ def restore(
     _load_dotenv()
     cfg = load_app_config()
     r2cfg = R2Config.from_env_or_config(cfg)
-    st = StateStore.open_default()
+    st = _open_state(state_dir)
     with st.run_lock():
         st.clear_inflight_restores()
         gmail = GmailClient.from_stored_token(
@@ -304,6 +324,11 @@ def restore(
 
 @app.command("rehydrate-index")
 def rehydrate_index(
+    state_dir: Optional[Path] = typer.Option(
+        None,
+        "--state-dir",
+        help="Directory for local state (token.json, state.json, index.sqlite3). Use one per Gmail account.",
+    ),
     restore_markers: bool = typer.Option(
         False,
         "--restore-markers",
@@ -330,7 +355,7 @@ def rehydrate_index(
     _load_dotenv()
     cfg = load_app_config()
     r2cfg = R2Config.from_env_or_config(cfg)
-    st = StateStore.open_default()
+    st = _open_state(state_dir)
     with st.run_lock():
         r2 = R2Client(r2cfg)
 
@@ -401,6 +426,11 @@ def rehydrate_index(
 @app.command()
 def daemon(
     every: int = typer.Option(..., "--every", min=30, help="Interval in seconds (>= 30)."),
+    state_dir: Optional[Path] = typer.Option(
+        None,
+        "--state-dir",
+        help="Directory for local state (token.json, state.json, index.sqlite3). Use one per Gmail account.",
+    ),
     since: Optional[str] = typer.Option(None, "--since", help="Same as backup --since (used for fallback scans)."),
     max_messages: int = typer.Option(0, "--max-messages", min=0),
     workers: int = typer.Option(4, "--workers", min=1),
@@ -408,7 +438,13 @@ def daemon(
 ) -> None:
     while True:
         try:
-            backup(since=since, max_messages=max_messages, workers=workers, auto_prefix=auto_prefix)
+            backup(
+                state_dir=state_dir,
+                since=since,
+                max_messages=max_messages,
+                workers=workers,
+                auto_prefix=auto_prefix,
+            )
         except typer.Exit as e:
             # backup() uses Exit(code=2) to signal "completed with errors".
             if getattr(e, "exit_code", 0) not in (0, None):
